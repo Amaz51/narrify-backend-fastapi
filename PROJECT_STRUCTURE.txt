@@ -1,0 +1,176 @@
+NARRIFY PROJECT STRUCTURE
+=========================
+
+Root Directory: /Users/amazahmed/Documents/narrify-backend-complete/
+
+.
+├── .git/                                    # Git repository
+├── .gitignore                               # Git ignore rules
+├── README.md                                # Project documentation
+├── PROJECT_STRUCTURE.txt                    # This file
+│
+├── backend/                                 # Main backend application
+│   ├── .env.example                         # Environment variables template
+│   ├── requirements.txt                     # Python dependencies
+│   ├── start.sh                             # Application startup script
+│   │
+│   ├── app/                                 # Application source code
+│   │   ├── __init__.py                      # Package initializer
+│   │   ├── config.py                        # Configuration settings
+│   │   ├── main.py                          # Application entry point
+│   │   │
+│   │   ├── api/                             # API layer
+│   │   │   ├── __init__.py
+│   │   │   └── routes.py                    # API endpoint definitions
+│   │   │
+│   │   ├── models/                          # Data models and schemas
+│   │   │   ├── __init__.py
+│   │   │   └── schemas.py                   # Pydantic schemas for validation
+│   │   │
+│   │   ├── services/                        # Business logic services
+│   │   │   ├── __init__.py
+│   │   │   ├── audio_service.py             # Audio file handling
+│   │   │   ├── audio_stitching.py           # Audio stitching/merging
+│   │   │   ├── pdf_service.py               # PDF processing and extraction
+│   │   │   ├── processor.py                 # Main processing orchestrator
+│   │   │   ├── text_service.py              # Text processing utilities
+│   │   │   ├── tts_service.py               # Text-to-speech conversion
+│   │   │   │
+│   │   │   ├── nlp/                         # Natural Language Processing
+│   │   │   │   ├── __init__.py
+│   │   │   │   ├── dialogue_service.py      # Dialogue detection and extraction
+│   │   │   │   ├── emotion_engine.py        # Emotion detection/analysis
+│   │   │   │   └── speaker_service.py       # Speaker identification
+│   │   │   │
+│   │   │   └── tts/                         # Text-to-Speech specific
+│   │   │       └── voice_pool.py            # Voice management pool
+│   │   │
+│   │   └── utils/                           # Utility functions
+│   │       ├── __init__.py
+│   │       ├── helpers.py                   # Helper functions
+│   │       └── logger.py                    # Logging configuration
+│   │
+│   ├── data/                                # Data directories
+│   │   ├── uploads/                         # User uploaded files (PDFs, etc.)
+│   │   ├── outputs/                         # Generated output files (audio)
+│   │   ├── cache/                           # Cached data
+│   │   └── voices/                          # Voice samples
+│   │
+│   ├── logs/                                # Application logs
+│   │   └── *.log                            # Log files
+│   │
+│   └── models/                              # Pre-trained ML models
+│       └── tts/
+│           └── tts_models--multilingual--multi-dataset--xtts_v2/
+│               ├── config.json              # Model configuration
+│               ├── hash.md5                 # Integrity check
+│               ├── model.pth                # Main model weights
+│               ├── speakers_xtts.pth        # Speaker embeddings
+│               └── vocab.json               # Vocabulary mapping
+│
+└── testingchapter.pdf                       # Test PDF file
+
+
+FEATURE BREAKDOWN
+=================
+
+Audio Services:
+- audio_service.py: Handles audio file I/O and manipulation
+- audio_stitching.py: Stitches multiple audio segments together
+- tts_service.py: Converts text to speech using XTTS v2
+
+Text & PDF Processing:
+- text_service.py: Text normalization and preprocessing
+- pdf_service.py: Extracts text from PDF documents
+
+NLP Features:
+- dialogue_service.py: Detects and extracts dialogue from text
+- emotion_engine.py: Analyzes emotional content
+- speaker_service.py: Identifies speakers in text
+
+API Layer:
+- routes.py: Defines REST API endpoints
+
+Configuration:
+- config.py: Centralized configuration management
+- .env.example: Environment variable template
+
+
+DATA FLOW
+=========
+
+User PDF Upload
+    ↓
+pdf_service.py (Extract text and metadata)
+    ↓
+text_service.py (Normalize and preprocess)
+    ↓
+dialogue_service.py (Detect dialogue vs narration)
+    ↓
+speaker_service.py (Identify speakers)
+    ↓
+emotion_engine.py (Detect emotional tone)
+    ↓
+tts_service.py (Convert to speech with XTTS v2)
+    ↓
+voice_pool.py (Apply voice styling)
+    ↓
+audio_stitching.py (Combine audio segments)
+    ↓
+Output audio file → outputs/ directory
+
+
+DEPENDENCIES
+============
+
+Key Python Packages:
+- FastAPI/Flask: Web framework
+- Pydantic: Data validation
+- TTS (coqui-tts): Text-to-speech engine
+- PyPDF2/pdfplumber: PDF processing
+- Transformers: NLP models
+- Torch: Deep learning framework
+- Librosa: Audio processing
+- Loguru: Logging
+- Python 3.8+
+
+
+ENVIRONMENT SETUP
+=================
+
+1. Create virtual environment: python3 -m venv venv
+2. Activate: source venv/bin/activate
+3. Install dependencies: pip install -r requirements.txt
+4. Configure: cp .env.example .env (and edit .env)
+5. Run: bash start.sh
+
+
+KEY FILES BY FUNCTION
+=====================
+
+Entry Points:
+- app/main.py: Application startup
+- start.sh: Shell startup script
+
+API:
+- app/api/routes.py: REST endpoints
+
+Data Validation:
+- app/models/schemas.py: Pydantic models
+
+Business Logic:
+- app/services/*.py: Core functionality
+
+Utilities:
+- app/utils/logger.py: Logging setup
+- app/utils/helpers.py: Common utilities
+
+
+NOTES
+=====
+
+- Models directory contains large pre-trained ML models (not uploaded to GitHub)
+- Data directories are configured with .gitkeep to preserve structure
+- Logs directory stores application runtime logs
+- All Python cache files (__pycache__) are ignored
+- Virtual environment (venv) is excluded from version control

@@ -40,6 +40,12 @@ env/
 .env.local
 .env.*.local
 
+
+.pdf
+*.pdf
+
+.wav
+*wav
 # Logs
 logs/
 *.log

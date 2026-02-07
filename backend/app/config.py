@@ -6,7 +6,7 @@
 
 import os
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -292,6 +292,24 @@ class Settings(BaseSettings):
             size_bytes /= 1024.0
         return f"{size_bytes:.2f} TB"
 
+    EMOTION_MODEL: str = "j-hartmann/emotion-english-distilroberta-base"
+    
+    # NLP Model
+    SPACY_MODEL: str = "en_core_web_sm"
+    
+    # Multi-Speaker Detection
+    ENABLE_SPEAKER_DETECTION: bool = True
+    ENABLE_EMOTION_DETECTION: bool = True
+    
+    # Speaker Gender Mapping (extend as needed)
+    DEFAULT_CHARACTER_GENDERS: Dict[str, str] = {
+        # From examples
+        "harry": "male",
+        "hermione": "female",
+        "ron": "male",
+        "narrator": "neutral",
+        # Add more as needed
+    }
 
 # GLOBAL SETTINGS INSTANCE
 

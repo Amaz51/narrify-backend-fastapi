@@ -68,7 +68,7 @@ def setup_logger(
 
 def get_logger(name: str):
     
-    Get logger instance for a module
+    #Get logger instance for a module
 
     return logger.bind(name=name)
 

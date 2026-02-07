@@ -1,8 +1,13 @@
-# Defines all REST API endpoints for the Narrify application.
+"""
+API Routes - Enhanced with Multi-Speaker Emotion-Aware Features
+Backward compatible with Phase 1 (all original endpoints preserved)
+"""
+
 import asyncio
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 import torch
+import time
 
 from fastapi import (
     APIRouter,
@@ -11,12 +16,14 @@ from fastapi import (
     HTTPException,
     UploadFile,
     status,
+    Query,
 )
 from fastapi.responses import FileResponse
 from loguru import logger
 
 from app.config import settings
 from app.models.schemas import (
+    # Phase 1 Schemas (Original)
     AudioGenerationRequest,
     AudioGenerationResponse,
     ChapterInfo,
@@ -26,11 +33,32 @@ from app.models.schemas import (
     HealthResponse,
     VoiceInfo,
     VoicesResponse,
+    # Phase 2 Schemas (NEW)
+    ProcessingRequestV2,
+    ProcessingResponseV2,
+    MultiSpeakerGenerationRequest,
+    MultiSpeakerGenerationResponse,
+    SpeakerSegment,
+    EmotionStatistics,
+    SpeakerStatistics,
 )
+
+# Phase 1 Services (Original)
 from app.services.audio_service import audio_service
 from app.services.pdf_service import pdf_service
 from app.services.text_service import text_service
 from app.services.tts_service import tts_service
+
+# Phase 2 Services (NEW)
+try:
+    from app.services.processor import audiobook_processor
+    from app.services.nlp.dialogue_service import dialogue_service
+    from app.services.nlp.speaker_service import speaker_service
+    from app.services.nlp.emotion_engine import emotion_service
+    PHASE_2_ENABLED = True
+except ImportError:
+    logger.warning("Phase 2 services not available - multi-speaker features disabled")
+    PHASE_2_ENABLED = False
 
 # Create router
 router = APIRouter()
@@ -40,6 +68,13 @@ pdf_cache = {}
 
 # Cache for chapters (file_id -> List[Chapter])
 chapter_cache = {}
+segment_cache = {}
+
+# NEW: Cache for processed segments (file_id -> processed data)
+segment_cache = {}
+
+
+# ==================== PHASE 1 ENDPOINTS (ORIGINAL) ====================
 
 # HEALTH CHECK
 
@@ -50,13 +85,14 @@ chapter_cache = {}
     description="Check API health and model status",
 )
 async def health_check():
-    # health status
+    """Health status check"""
     return HealthResponse(
         status="healthy",
         version=settings.APP_VERSION,
         model_loaded=tts_service.is_model_loaded(),
         device=settings.get_device(),
     )
+
 
 # PDF UPLOAD & PROCESSING
 
@@ -71,12 +107,11 @@ async def health_check():
         413: {"model": ErrorResponse, "description": "File too large"},
     },
 )
-
 async def upload_pdf(file: UploadFile = File(..., description="PDF file to upload")):
-    
-    # Upload and process PDF file
-    # Upload confirmation with file ID and metadata
-    
+    """
+    Upload and process PDF file
+    Returns: Upload confirmation with file ID and metadata
+    """
     try:
         logger.info(f"Received upload: {file.filename}")
 
@@ -139,6 +174,7 @@ async def upload_pdf(file: UploadFile = File(..., description="PDF file to uploa
             detail=f"Upload processing failed: {str(e)}",
         )
 
+
 # CHAPTER RETRIEVAL
 
 @router.get(
@@ -149,9 +185,7 @@ async def upload_pdf(file: UploadFile = File(..., description="PDF file to uploa
     responses={404: {"model": ErrorResponse, "description": "File not found"}},
 )
 async def get_chapters(file_id: str):
-    
-    # Get chapters for uploaded file
-    
+    """Get chapters for uploaded file"""
     try:
         # Check cache
         if file_id not in chapter_cache:
@@ -198,6 +232,7 @@ async def get_chapters(file_id: str):
             detail=f"Failed to retrieve chapters: {str(e)}",
         )
 
+
 # VOICE MANAGEMENT
 
 @router.get(
@@ -207,9 +242,7 @@ async def get_chapters(file_id: str):
     description="Get list of available voices",
 )
 async def get_voices():
-    
-    # Returns list of voice options
-    
+    """Returns list of voice options"""
     try:
         voices_data = tts_service.get_available_voices()
 
@@ -243,9 +276,7 @@ async def get_voices():
     responses={404: {"description": "Voice sample not found"}},
 )
 async def get_voice_sample(voice_id: str):
-    
-    # Get voice sample audio
-
+    """Get voice sample audio"""
     try:
         # Find voice config
         voice_config = next(
@@ -281,25 +312,24 @@ async def get_voice_sample(voice_id: str):
             detail=f"Failed to retrieve sample: {str(e)}",
         )
 
-# AUDIO GENERATION
+
+# AUDIO GENERATION (ORIGINAL - SINGLE SPEAKER)
 
 @router.post(
     "/generate",
     response_model=AudioGenerationResponse,
-    summary="Generate Audio",
-    description="Generate audiobook for a chapter",
+    summary="Generate Audio (Single Speaker)",
+    description="Generate audiobook for a chapter with single voice [PHASE 1]",
     responses={
         400: {"model": ErrorResponse, "description": "Invalid parameters"},
         404: {"model": ErrorResponse, "description": "File or chapter not found"},
     },
 )
 async def generate_audio(request: AudioGenerationRequest):
-    
-    # Generate audiobook audio for a chapter
-    # Generated audio information
-    
-    import time
-
+    """
+    Generate audiobook audio for a chapter (ORIGINAL ENDPOINT)
+    Returns: Generated audio information
+    """
     try:
         logger.info(
             f"Generating audio: {request.file_id}, ch{request.chapter}, voice:{request.voice}"
@@ -414,6 +444,7 @@ async def generate_audio(request: AudioGenerationRequest):
             detail=f"Audio generation failed: {str(e)}",
         )
 
+
 # AUDIO DOWNLOAD
 
 @router.get(
@@ -423,9 +454,7 @@ async def generate_audio(request: AudioGenerationRequest):
     responses={404: {"description": "File not found"}},
 )
 async def download_audio(filename: str):
-    
-    # Download generated audio file
-
+    """Download generated audio file"""
     try:
         file_path = settings.OUTPUT_DIR / filename
 
@@ -453,6 +482,7 @@ async def download_audio(filename: str):
             detail=f"Download failed: {str(e)}",
         )
 
+
 # SYSTEM MANAGEMENT
 
 @router.post(
@@ -462,9 +492,7 @@ async def download_audio(filename: str):
     responses={200: {"description": "Cleanup completed"}},
 )
 async def cleanup_files():
-
-    # Clean up old files
-
+    """Clean up old files"""
     try:
         # Cleanup in parallel
         pdf_count, audio_count, temp_count = await asyncio.gather(
@@ -490,6 +518,7 @@ async def cleanup_files():
             detail=f"Cleanup failed: {str(e)}",
         )
 
+
 # STATISTICS
 
 @router.get(
@@ -498,9 +527,7 @@ async def cleanup_files():
     description="Get system usage statistics",
 )
 async def get_statistics():
-
-    # Get system statistics
-
+    """Get system statistics"""
     try:
         # Count files
         upload_count = len(list(settings.UPLOAD_DIR.glob("*.pdf")))
@@ -515,7 +542,7 @@ async def get_statistics():
             if f.is_file()
         )
 
-        return {
+        stats = {
             "uploads": {
                 "total": upload_count,
                 "cached": len(pdf_cache),
@@ -529,6 +556,15 @@ async def get_statistics():
             },
             "model": tts_service.get_model_info(),
         }
+        
+        # Add Phase 2 stats if available
+        if PHASE_2_ENABLED:
+            stats["phase_2"] = {
+                "enabled": True,
+                "processed_files": len(segment_cache),
+            }
+        
+        return stats
 
     except Exception as e:
         logger.error(f"Failed to get statistics: {e}")
@@ -536,6 +572,337 @@ async def get_statistics():
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to get statistics: {str(e)}",
         )
+
+
+# ==================== PHASE 2 ENDPOINTS (NEW) ====================
+
+@router.post(
+    "/process/v2",
+    response_model=ProcessingResponseV2,
+    summary="Process PDF with Multi-Speaker Detection [PHASE 2]",
+    description="Process PDF with dialogue detection, speaker identification, and emotion analysis",
+    responses={404: {"model": ErrorResponse, "description": "File not found"}},
+)
+async def process_pdf_v2(request: ProcessingRequestV2):
+    """
+    **NEW: Multi-Speaker Emotion-Aware Processing**
+    
+    Process PDF with:
+    - Dialogue detection
+    - Speaker identification
+    - Emotion analysis
+    - Gender inference
+    
+    Returns speaker-tagged, emotion-labeled segments
+    """
+    try:
+        logger.info(f"Processing v2: {request.file_id}")
+        
+        # CRITICAL FIX: Use cached data instead of looking for file
+        if request.file_id not in chapter_cache:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"File not found in cache: {request.file_id}. Please upload PDF first using /api/upload",
+            )
+        
+        # Get cached data
+        chapters = chapter_cache[request.file_id]
+        pdf_doc = pdf_cache.get(request.file_id)
+        
+        if not pdf_doc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="PDF document not found in cache",
+            )
+        
+        # Process using cached data (NOT file path)
+        result = await audiobook_processor.process_pdf_from_cache(
+            pdf_doc=pdf_doc,
+            chapters=chapters,
+            detect_emotions=request.detect_emotions
+        )
+        
+        # Cache processed segments for later use
+        segment_cache[request.file_id] = result
+        
+        logger.info(
+            f"Processed {result['total_segments']} segments "
+            f"with {len(result['speakers_detected'])} speakers"
+        )
+        
+        return ProcessingResponseV2(
+            file_id=result['file_id'],
+            total_chapters=result['total_chapters'],
+            total_segments=result['total_segments'],
+            speakers_detected=result['speakers_detected'],
+            chapters=result['chapters'],
+            processing_time=result['processing_time']
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Processing v2 failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Processing failed: {str(e)}",
+        )
+
+@router.post(
+    "/generate/multi-speaker",
+    response_model=MultiSpeakerGenerationResponse,
+    summary="Generate Multi-Speaker Audiobook [PHASE 2]",
+    description="Generate audiobook with multiple voices and emotion-aware prosody",
+)
+async def generate_multi_speaker(request: MultiSpeakerGenerationRequest):
+    """
+    **UPDATED: Multi-Speaker Emotion-Aware Generation**
+    
+    NOW ACCEPTS BOTH FORMATS:
+    1. Direct segments array
+    2. /process/v2 output with chapters
+    
+    Generate audiobook with:
+    - Multiple voices for different speakers
+    - Emotion-aware prosody adjustments
+    - Natural dialogue narration
+    """
+    try:
+        logger.info(
+            f"Multi-speaker generation: {request.file_id}"
+        )
+        
+        start_time = time.time()
+        
+        # CRITICAL FIX: Extract segments from EITHER format
+        segments = None
+        
+        # Format 1: Direct segments array (original format)
+        if request.segments:
+            segments = [seg.dict() for seg in request.segments]
+            logger.info(f"Using direct segments format: {len(segments)} segments")
+        
+        # Format 2: Chapters with nested segments (from /process/v2)
+        elif hasattr(request, '__dict__') and 'chapters' in request.__dict__:
+            # Extract from Pydantic model's extra fields
+            chapters = request.__dict__.get('chapters', [])
+            if chapters:
+                segments = []
+                for chapter in chapters:
+                    if isinstance(chapter, dict) and 'segments' in chapter:
+                        segments.extend(chapter['segments'])
+                logger.info(f"Extracted {len(segments)} segments from {len(chapters)} chapters")
+        
+        # Format 3: Check raw request dict (if Config.extra = "allow")
+        if not segments:
+            # Try to get from the raw request
+            request_dict = request.dict()
+            if 'chapters' in request_dict and request_dict['chapters']:
+                chapters = request_dict['chapters']
+                segments = []
+                for chapter in chapters:
+                    if 'segments' in chapter:
+                        segments.extend(chapter['segments'])
+                logger.info(f"Extracted {len(segments)} segments from chapters in request dict")
+        
+        # Final check
+        if not segments or len(segments) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "No segments found. Please provide either:\n"
+                    "1. 'segments' array directly, OR\n"
+                    "2. 'chapters' array from /process/v2 output"
+                ),
+            )
+        
+        logger.info(f"Generating audio for {len(segments)} segments")
+        
+        # Create voice assignments
+        voice_assignments = {}
+        if request.voice_assignments:
+            for assignment in request.voice_assignments:
+                voice_assignments[assignment.speaker_name] = assignment.voice_id
+        
+        # Generate audiobook
+        output_path = await audiobook_processor.generate_audiobook(
+            segments=segments,
+            voice_assignments=voice_assignments if voice_assignments else None,
+            speed=request.base_speed
+        )
+        
+        # Get audio info
+        audio_info = audio_service.get_audio_info(output_path)
+        
+        generation_time = time.time() - start_time
+        
+        # Generate audiobook ID
+        audiobook_id = output_path.stem
+        
+        # Get speakers used
+        unique_speakers = {seg['speaker']: seg['gender'] for seg in segments}
+        
+        logger.info(
+            f"Multi-speaker audio generated in {generation_time:.1f}s: "
+            f"{output_path.name}"
+        )
+        
+        return MultiSpeakerGenerationResponse(
+            audiobook_id=audiobook_id,
+            audio_url=f"/api/outputs/{output_path.name}",
+            duration=audio_info.get('duration', 0.0),
+            segments_processed=len(segments),
+            speakers_used=unique_speakers,
+            generation_time=generation_time
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Multi-speaker generation failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Generation failed: {str(e)}",
+        )
+
+
+@router.post(
+    "/generate/from-processing",
+    summary="Generate from Process/v2 Output [PHASE 2 - FIXED]",
+    description="Accepts the exact output from /process/v2 and generates multi-speaker audio",
+)
+async def generate_from_processing(request: dict):
+    """
+    **FIXED ENDPOINT: Accepts /process/v2 output directly**
+    
+    Just paste the entire response from /process/v2 into this endpoint!
+    No manual JSON conversion needed.
+    
+    Example usage:
+    1. Call /process/v2 → Get response
+    2. Paste entire response here
+    3. Get audio!
+    """
+    try:
+        import time
+        
+        # Extract file_id
+        file_id = request.get('file_id')
+        if not file_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="file_id is required"
+            )
+        
+        logger.info(f"Generating from processing output: {file_id}")
+        
+        # Extract segments from chapters
+        segments = []
+        
+        if 'chapters' in request and isinstance(request['chapters'], list):
+            for chapter in request['chapters']:
+                if 'segments' in chapter and isinstance(chapter['segments'], list):
+                    segments.extend(chapter['segments'])
+            logger.info(f"Extracted {len(segments)} segments from {len(request['chapters'])} chapters")
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No chapters found in request. Expected output from /process/v2"
+            )
+        
+        if not segments:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No segments found in chapters"
+            )
+        
+        # Get optional parameters (with defaults)
+        base_speed = request.get('base_speed', 1.0)
+        apply_emotion_prosody = request.get('apply_emotion_prosody', True)
+        output_format = request.get('output_format', 'wav')
+        
+        # Generate audiobook
+        logger.info(f"Generating multi-speaker audio for {len(segments)} segments")
+        
+        start_time = time.time()
+        
+        # Import here to avoid circular imports
+        from app.services.processor import audiobook_processor
+        from app.services.audio_service import audio_service
+        
+        output_path = await audiobook_processor.generate_audiobook(
+            segments=segments,
+            voice_assignments=None,  # Auto-assign by gender
+            speed=base_speed
+        )
+        
+        generation_time = time.time() - start_time
+        
+        # Get audio info
+        audio_info = audio_service.get_audio_info(output_path)
+        
+        # Get unique speakers
+        unique_speakers = {seg['speaker']: seg['gender'] for seg in segments}
+        
+        logger.info(
+            f"✅ Multi-speaker audio generated: {output_path.name} "
+            f"({len(segments)} segments in {generation_time:.1f}s)"
+        )
+        
+        return {
+            "success": True,
+            "audiobook_id": output_path.stem,
+            "audio_url": f"/api/outputs/{output_path.name}",
+            "duration": audio_info.get('duration', 0.0),
+            "file_size": audio_info.get('file_size', 0),
+            "segments_processed": len(segments),
+            "speakers_used": unique_speakers,
+            "speakers_detected": request.get('speakers_detected', []),
+            "generation_time": generation_time
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Generation from processing failed: {e}")
+        import traceback
+        traceback.print_exc()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Generation failed: {str(e)}",
+        )
+
+
+
+@router.get(
+    "/segments/{file_id}",
+    summary="Get Processed Segments [PHASE 2]",
+    description="Get speaker-tagged, emotion-labeled segments for a file",
+)
+async def get_segments(file_id: str):
+    """Get processed segments with speaker and emotion data"""
+    try:
+        if file_id not in segment_cache:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="File not processed yet. Use /process/v2 first.",
+            )
+        
+        return segment_cache[file_id]
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get segments: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e),
+        )
+
 
 # EXPORT
 
