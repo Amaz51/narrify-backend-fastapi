@@ -75,26 +75,154 @@ class TTSService:
     def is_model_loaded(self) -> bool:
         """Check if model is loaded"""
         return self.model is not None
+    
+    # Emotion → temperature mapping for expressive variance
+    _EMOTION_TEMPERATURE = {
+        "neutral":    0.65,
+        "calm":       0.65,
+        "sad":        0.68,
+        "longing":    0.68,
+        "tender":     0.70,
+        "romantic":   0.72,
+        "happy":      0.78,
+        "excited":    0.82,
+        "surprised":  0.82,
+        "passionate": 0.84,
+        "angry":      0.85,
+        "breathless": 0.85,
+        "fearful":    0.80,
+        "disgust":    0.78,
+    }
+
+    def _get_emotion_temperature(self, emotion: str) -> float:
+        """Return appropriate temperature for the given emotion label."""
+        return self._EMOTION_TEMPERATURE.get(emotion.lower(), 0.75)
+
+    # ---- Number-to-words helper (uses num2words if available) ----
+    @staticmethod
+    def _num_to_words(n: str) -> str:
+        try:
+            import num2words
+            return num2words.num2words(int(n.replace(',', '')))
+        except Exception:
+            return n
+
+    @staticmethod
+    def _ordinal_to_words(n: str) -> str:
+        try:
+            import num2words
+            return num2words.num2words(int(n), to='ordinal')
+        except Exception:
+            return n
+
+    def _clean_text(self, text: str) -> str:
+        """
+        Clean and pre-process text for natural-sounding TTS output.
+
+        Pipeline:
+          1. Whitespace normalisation
+          2. Abbreviation expansion (Mr/Dr/etc.)
+          3. Currency → spoken form  ($12.50 → "twelve dollars fifty")
+          4. Ordinal numbers  (3rd → "third")
+          5. Cardinal numbers (1,234 → "one thousand two hundred thirty four")
+          6. Acronym spacing  (FBI → "F B I")
+          7. Punctuation → prosodic cues
+          8. Strip XTTS-incompatible characters
+        """
+        import re
+
+        # 1. Whitespace
+        text = text.replace('\n', ' ').replace('\r', ' ')
+        text = re.sub(r'\s+', ' ', text).strip()
+
+        # 2. Abbreviations
+        abbrev = {
+            r'\bMr\.': 'Mister', r'\bMrs\.': 'Missus', r'\bMs\.': 'Miss',
+            r'\bDr\.': 'Doctor', r'\bProf\.': 'Professor',
+            r'\bSt\.': 'Saint',  r'\bvs\.': 'versus',
+            r'\betc\.': 'etcetera', r'\be\.g\.': 'for example',
+            r'\bi\.e\.': 'that is', r'\bapprox\.': 'approximately',
+        }
+        for pat, repl in abbrev.items():
+            text = re.sub(pat, repl, text, flags=re.IGNORECASE)
+
+        # 3. Currency  ($12.50 / £100 / €45)
+        def _currency(m):
+            sym = m.group(1)
+            amount = m.group(2).replace(',', '')
+            name = {'$': 'dollars', '£': 'pounds', '€': 'euros'}.get(sym, sym)
+            try:
+                val = float(amount)
+                major = int(val)
+                minor = round((val - major) * 100)
+                parts = [self._num_to_words(str(major)), name]
+                if minor:
+                    parts += [self._num_to_words(str(minor)),
+                               'cents' if sym == '$' else 'pence' if sym == '£' else 'cents']
+                return ' '.join(parts)
+            except Exception:
+                return m.group(0)
+        text = re.sub(r'([\$£€])([\d,]+(?:\.\d{1,2})?)', _currency, text)
+
+        # 4. Ordinal numbers  (1st, 2nd, 3rd, 4th …)
+        def _ordinal(m):
+            return self._ordinal_to_words(m.group(1))
+        text = re.sub(r'\b(\d+)(?:st|nd|rd|th)\b', _ordinal, text)
+
+        # 5. Cardinal numbers with commas or plain integers (up to 9 digits)
+        def _cardinal(m):
+            return self._num_to_words(m.group(0))
+        text = re.sub(r'\b\d{1,3}(?:,\d{3})+\b', _cardinal, text)   # comma-separated
+        text = re.sub(r'\b\d+\b', _cardinal, text)                    # plain digits
+
+        # 6. ALL-CAPS acronyms (3+ letters) → spaced letters  (NASA → "N A S A")
+        text = re.sub(
+            r'\b([A-Z]{3,})\b',
+            lambda m: ' '.join(list(m.group(1))),
+            text
+        )
+
+        # 7. Punctuation → prosodic cues
+        text = re.sub(r'\s*[—–]\s*', ', ', text)      # em/en-dash → pause
+        text = re.sub(r'\.{2,}', '...', text)           # normalise ellipsis
+
+        # 8. Strip characters XTTS can't handle
+        text = re.sub(r'[^\w\s\.,!?\-\'\"…]', '', text)
+        text = re.sub(r'\s+', ' ', text).strip()
+
+        # Ensure terminal punctuation
+        if text and text[-1] not in '.!?…':
+            text += '.'
+
+        return text
+    
 
     async def generate_speech(
         self,
         text: str,
-        voice: str = "voice1",
+        voice: str = "voice7",
         speed: float = 1.0,
         language: str = "en",
         output_path: Optional[Path] = None,
+        emotion: str = "neutral",
     ) -> Path:
-        
+
         # Generate speech from text
         try:
-            start_time = time.time()
-            self.logger.info(f"Generating speech ({len(text)} chars, voice: {voice})")
+            text = self._clean_text(text)
+            temperature = self._get_emotion_temperature(emotion)
+
+            self.logger.info(
+                f"Generating speech ({len(text)} chars, voice: {voice}, "
+                f"emotion: {emotion}, temp: {temperature:.2f})"
+            )
 
             # Generate output path if not provided
             if output_path is None:
                 audio_id = str(uuid.uuid4())[:12]
                 output_path = self.output_dir / f"{audio_id}.wav"
 
+            start_time = time.time()
             # Get voice sample path
             voice_sample_path = self._get_voice_sample_path(voice)
 
@@ -108,6 +236,7 @@ class TTSService:
                 str(output_path),
                 language,
                 speed,
+                temperature,
             )
 
             generation_time = time.time() - start_time
@@ -128,8 +257,9 @@ class TTSService:
         output_path: str,
         language: str,
         speed: float,
+        temperature: float = 0.75,
     ):
-        
+
         # Synchronous audio generation
         try:
             # Generate audio with zero-shot voice cloning
@@ -139,6 +269,11 @@ class TTSService:
                 speaker_wav=speaker_wav,
                 language=language,
                 speed=speed,
+                temperature=temperature,   # Emotion-aware variance
+                length_penalty=1.0,
+                repetition_penalty=5.0,    # Prevent monotone repetition
+                top_k=50,
+                top_p=0.85,
             )
 
         except Exception as e:

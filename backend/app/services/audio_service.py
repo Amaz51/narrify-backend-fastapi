@@ -38,9 +38,12 @@ class AudioService:
         output_format: AudioFormat = AudioFormat.WAV,
         normalize: bool = True,
         trim_silence: bool = True,
+        apply_eq: bool = True,
+        apply_compression: bool = True,
+        apply_deessing: bool = True,
     ) -> Path:
 
-        # Complete audio processing pipeline
+        # Complete broadcast-grade audio processing pipeline
         # Returns Path to processed audio file
 
         try:
@@ -49,25 +52,37 @@ class AudioService:
             # Load audio
             audio, sr = librosa.load(str(input_path), sr=self.sample_rate)
 
-            # Apply pitch shift
+            # 1. Trim leading/trailing silence first (cleaner signal for EQ)
+            if trim_silence:
+                audio = self._trim_silence(audio, sr)
+
+            # 2. EQ chain: high-pass, presence, air
+            if apply_eq:
+                audio = self._apply_eq_chain(audio, sr)
+
+            # 3. Apply pitch shift (optional user parameter)
             if pitch != 0:
                 audio = self._adjust_pitch(audio, sr, pitch)
 
-            # Apply speed change
+            # 4. Apply speed change (optional user parameter)
             if speed != 1.0:
                 audio = self._adjust_speed(audio, sr, speed)
 
-            # Apply tone preset
+            # 5. Apply tone preset
             if tone != TonePreset.NORMAL:
                 audio = self._apply_tone(audio, sr, tone)
 
-            # Normalize loudness
+            # 6. De-esser (before compression so sibilance doesn't pump the compressor)
+            if apply_deessing:
+                audio = self._deess(audio, sr)
+
+            # 7. Soft compression – tighten dynamic range
+            if apply_compression:
+                audio = self._soft_compress(audio)
+
+            # 8. Broadcast LUFS normalization (target -18 LUFS / Audible standard)
             if normalize:
                 audio = self._normalize_audio(audio)
-
-            # Trim silence
-            if trim_silence:
-                audio = self._trim_silence(audio, sr)
 
             # Generate output path
             audio_id = str(uuid.uuid4())[:12]
@@ -155,23 +170,133 @@ class AudioService:
             return audio
 
     def _normalize_audio(self, audio: np.ndarray) -> np.ndarray:
-        
-        # Normalize audio loudness
-        
-        self.logger.debug("Normalizing audio")
-
+        """
+        Broadcast-standard loudness normalization targeting -18 LUFS
+        (Amazon Audible spec).  Falls back to peak normalization if pyloudnorm
+        is not installed.
+        """
+        self.logger.debug("Normalizing audio (broadcast standard)")
         try:
-            # Peak normalization
-            if np.max(np.abs(audio)) > 0:
-                audio = audio / np.max(np.abs(audio))
-
-            # Optionally apply compression (reduce dynamic range)
-            audio = np.tanh(audio * 0.9)
-
+            import pyloudnorm as pyln
+            meter = pyln.Meter(self.sample_rate)
+            loudness = meter.integrated_loudness(audio)
+            # Avoid normalizing silence / near-silence
+            if loudness < -70:
+                return audio
+            normalized = pyln.normalize.loudness(audio, loudness, -18.0)
+            # Safety: hard-limit to prevent clipping after normalization
+            normalized = np.clip(normalized, -0.98, 0.98)
+            return normalized.astype(np.float32)
+        except ImportError:
+            # Fallback: peak normalization
+            peak = np.max(np.abs(audio))
+            if peak > 0:
+                audio = audio / peak * 0.95
             return audio
-
         except Exception as e:
             self.logger.warning(f"Normalization failed: {e}, returning original")
+            return audio
+
+    def _apply_eq_chain(self, audio: np.ndarray, sr: int) -> np.ndarray:
+        """
+        Audiobook EQ chain:
+          1. High-pass at 80 Hz  – removes low-frequency rumble
+          2. Gentle presence boost 2–5 kHz +2 dB – clarity / intelligibility
+          3. Air shelf 8 kHz +1.5 dB – brightness without harshness
+        """
+        try:
+            from scipy import signal as _sig
+
+            # 1. High-pass 80 Hz (3rd order Butterworth)
+            sos_hp = _sig.butter(3, 80, btype='high', fs=sr, output='sos')
+            audio = _sig.sosfilt(sos_hp, audio)
+
+            # 2. Presence peak: +2 dB centred at 3 kHz, Q=1.0
+            b_pres, a_pres = self._peaking_eq(sr, freq=3000, gain_db=2.0, Q=1.0)
+            audio = _sig.lfilter(b_pres, a_pres, audio)
+
+            # 3. Air shelf: +1.5 dB at 8 kHz (high-shelf)
+            b_air, a_air = self._high_shelf_eq(sr, freq=8000, gain_db=1.5)
+            audio = _sig.lfilter(b_air, a_air, audio)
+
+            return audio.astype(np.float32)
+        except Exception as e:
+            self.logger.warning(f"EQ chain failed: {e}")
+            return audio
+
+    def _peaking_eq(self, sr: int, freq: float, gain_db: float, Q: float):
+        """Biquad peaking EQ filter coefficients."""
+        import math
+        A = 10 ** (gain_db / 40.0)
+        w0 = 2 * math.pi * freq / sr
+        alpha = math.sin(w0) / (2 * Q)
+        b0 =  1 + alpha * A
+        b1 = -2 * math.cos(w0)
+        b2 =  1 - alpha * A
+        a0 =  1 + alpha / A
+        a1 = -2 * math.cos(w0)
+        a2 =  1 - alpha / A
+        return [b0/a0, b1/a0, b2/a0], [1.0, a1/a0, a2/a0]
+
+    def _high_shelf_eq(self, sr: int, freq: float, gain_db: float):
+        """Biquad high-shelf EQ filter coefficients."""
+        import math
+        A = 10 ** (gain_db / 40.0)
+        w0 = 2 * math.pi * freq / sr
+        alpha = math.sin(w0) / 2 * math.sqrt((A + 1/A) * (1/0.707 - 1) + 2)
+        cosw = math.cos(w0)
+        b0 =       A * ((A+1) + (A-1)*cosw + 2*math.sqrt(A)*alpha)
+        b1 = -2 * A * ((A-1) + (A+1)*cosw)
+        b2 =       A * ((A+1) + (A-1)*cosw - 2*math.sqrt(A)*alpha)
+        a0 =            (A+1) - (A-1)*cosw + 2*math.sqrt(A)*alpha
+        a1 =   2 *     ((A-1) - (A+1)*cosw)
+        a2 =            (A+1) - (A-1)*cosw - 2*math.sqrt(A)*alpha
+        return [b0/a0, b1/a0, b2/a0], [1.0, a1/a0, a2/a0]
+
+    def _soft_compress(self, audio: np.ndarray, threshold: float = 0.5,
+                       ratio: float = 3.0, makeup_db: float = 1.5) -> np.ndarray:
+        """
+        Soft-knee compressor to tighten dynamic range.
+        Threshold and makeup gain are applied in the linear domain.
+        """
+        try:
+            makeup = 10 ** (makeup_db / 20.0)
+            abs_audio = np.abs(audio)
+            gain = np.where(
+                abs_audio > threshold,
+                threshold + (abs_audio - threshold) / ratio,
+                abs_audio
+            )
+            # Avoid division by zero on silent frames
+            scale = np.where(abs_audio > 1e-8, gain / (abs_audio + 1e-8), 1.0)
+            return np.clip(audio * scale * makeup, -0.98, 0.98).astype(np.float32)
+        except Exception as e:
+            self.logger.warning(f"Compression failed: {e}")
+            return audio
+
+    def _deess(self, audio: np.ndarray, sr: int,
+               threshold: float = 0.06, freq: float = 6500.0) -> np.ndarray:
+        """
+        Frequency-selective de-esser: attenuates sibilance in the 5–9 kHz band
+        when energy exceeds threshold.
+        """
+        try:
+            from scipy import signal as _sig
+            # Isolate the sibilance band
+            sos = _sig.butter(4, [5000, 9000], btype='bandpass', fs=sr, output='sos')
+            sibilance = _sig.sosfilt(sos, audio)
+            # Compute short-time energy envelope
+            frame = int(sr * 0.005)   # 5 ms frames
+            pad = frame - (len(sibilance) % frame or frame)
+            padded = np.pad(sibilance, (0, pad))
+            frames = padded.reshape(-1, frame)
+            energy = np.sqrt(np.mean(frames ** 2, axis=1))
+            # Build per-sample gain reduction
+            gain_frames = np.where(energy > threshold, threshold / (energy + 1e-8), 1.0)
+            gain = np.repeat(gain_frames, frame)[: len(audio)]
+            return (audio * gain).astype(np.float32)
+        except Exception as e:
+            self.logger.warning(f"De-essing failed: {e}")
             return audio
 
     def _trim_silence(self, audio: np.ndarray, sr: int) -> np.ndarray:
@@ -199,29 +324,48 @@ class AudioService:
             return audio
 
     def _convert_to_mp3(self, input_path: Path, output_path: Path):
-        
-        # Convert WAV to MP3
-        self.logger.debug(f"Converting to MP3: {output_path}")
+
+        # Convert WAV to MP3 at 192 kbps (audiobook distribution standard)
+        self.logger.debug(f"Converting to MP3 192kbps: {output_path}")
 
         try:
             audio = AudioSegment.from_wav(str(input_path))
             audio.export(
                 str(output_path),
                 format="mp3",
-                bitrate=settings.AUDIO_BITRATE,
-                parameters=["-q:a", "0"],  # Highest quality
+                bitrate="192k",       # Audible / Apple Books distribution quality
+                parameters=["-q:a", "0"],  # Highest quality VBR pass
             )
 
         except Exception as e:
             self.logger.error(f"MP3 conversion failed: {e}")
             raise
 
+    def _make_silence(self, duration_ms: int) -> np.ndarray:
+        """Return a numpy array of silence for the given duration in milliseconds."""
+        num_samples = int(self.sample_rate * duration_ms / 1000)
+        return np.zeros(num_samples, dtype=np.float32)
+
     async def merge_audio_files(
-        self, audio_files: list[Path], output_path: Optional[Path] = None
+        self,
+        audio_files: list[Path],
+        output_path: Optional[Path] = None,
+        speaker_sequence: Optional[list] = None,
+        inter_speaker_silence_ms: int = 250,
+        intra_speaker_silence_ms: int = 80,
     ) -> Path:
-        
-        # Merge multiple audio files into one
-        
+        """
+        Merge audio files with natural silence gaps.
+
+        Args:
+            audio_files: Ordered list of per-segment WAV files.
+            output_path: Where to write the final merged file.
+            speaker_sequence: Optional list of speaker labels (same length as
+                audio_files).  When provided, a longer gap is inserted between
+                consecutive segments from *different* speakers.
+            inter_speaker_silence_ms: Gap (ms) between different speakers (default 250).
+            intra_speaker_silence_ms: Gap (ms) between same-speaker segments (default 80).
+        """
         try:
             self.logger.info(f"Merging {len(audio_files)} audio files")
 
@@ -231,22 +375,31 @@ class AudioService:
             if len(audio_files) == 1:
                 return audio_files[0]
 
-            # Load all audio files
-            audio_data = []
-            for audio_file in audio_files:
-                audio, sr = librosa.load(str(audio_file), sr=self.sample_rate)
-                audio_data.append(audio)
+            # Build concatenation with silence gaps
+            pieces = []
+            for idx, audio_file in enumerate(audio_files):
+                audio, _ = librosa.load(str(audio_file), sr=self.sample_rate)
+                audio = librosa.util.normalize(audio)
+                pieces.append(audio)
 
-            # Concatenate
-            merged_audio = np.concatenate(audio_data)
+                # Insert silence after every segment except the last
+                if idx < len(audio_files) - 1:
+                    if speaker_sequence and len(speaker_sequence) > idx + 1:
+                        same_speaker = (speaker_sequence[idx] == speaker_sequence[idx + 1])
+                        gap_ms = intra_speaker_silence_ms if same_speaker else inter_speaker_silence_ms
+                    else:
+                        gap_ms = intra_speaker_silence_ms
+                    pieces.append(self._make_silence(gap_ms))
 
-            # Generate output path if not provided
+            merged_audio = np.concatenate(pieces)
+            merged_audio = librosa.util.normalize(merged_audio)
+            merged_audio = merged_audio * 0.95  # Prevent clipping
+
             if output_path is None:
                 audio_id = str(uuid.uuid4())[:12]
                 output_path = self.output_dir / f"{audio_id}_merged.wav"
 
-            # Save merged audio
-            sf.write(str(output_path), merged_audio, self.sample_rate)
+            sf.write(str(output_path), merged_audio, self.sample_rate, subtype='PCM_16')
 
             self.logger.info(f"Audio files merged: {output_path}")
             return output_path

@@ -183,61 +183,126 @@ class AudiobookProcessor:
     ) -> List[Dict]:
         """
         Process chapter text into tagged segments
-        
+    
         Implements PDF requirements:
         - Sentence segmentation (spaCy)
         - Dialogue detection (quotation marks)
         - Speaker identification (reporting verbs)
         - Emotion detection (GoEmotions)
-        
+    
         Returns:
-            List of segment dicts with mandatory format
+        List of segment dicts with mandatory format
         """
         # Step 3: Normalize text
         self.logger.debug("Step 3/6: Normalizing text...")
         normalized_text = text_service.normalize(chapter_text)
-        
+
         # Step 4: Segment into sentences
         self.logger.debug("Step 4/6: Segmenting sentences...")
         sentences = self._segment_sentences(normalized_text)
-        
-        # Step 5-6: Process each sentence
+    
+        # Step 5-6: Process each sentence (dialogue + speaker detection first)
         segments = []
         previous_speaker = None
-        
+
         for sentence in sentences:
             if not sentence.strip():
                 continue
-            
+
             # Dialogue detection & speaker identification
             processed = dialogue_service.process_sentence(sentence, previous_speaker)
-            
+
+            text = processed['text'].strip()
+            if not text or len(text) < 3:
+                self.logger.debug(f"⚠️ Skipping short/empty segment: '{text}'")
+                continue
+
             # Gender inference
             gender = speaker_service.infer_gender(processed['speaker'])
-            
-            # Emotion detection
-            if detect_emotions:
-                emotion = emotion_service.detect_emotion(processed['text'])
-            else:
-                emotion = "neutral"
-            
-            # Create segment in MANDATORY format (PDF Section 3.7)
-            segment = {
+
+            segments.append({
                 "speaker": processed['speaker'],
                 "gender": gender,
-                "text": processed['text'],
-                "emotion": emotion,
+                "text": text,
+                "emotion": "neutral",          # placeholder — batch filled below
                 "segment_type": processed['segment_type']
-            }
-            
-            segments.append(segment)
-            
-            # Update previous speaker for context
+            })
+
             if processed['segment_type'] == 'dialogue':
                 previous_speaker = processed['speaker']
-        
-        self.logger.debug(f"Created {len(segments)} segments")
+
+        # Batch emotion detection — single BERT call for all segments
+        if detect_emotions and segments:
+            texts = [seg['text'] for seg in segments]
+            emotions = emotion_service.batch_detect_emotions(texts)
+            for seg, emo in zip(segments, emotions):
+                seg['emotion'] = emo
+
+        self.logger.debug(f"Created {len(segments)} segments (filtered empty)")
         return segments
+
+    # async def _process_chapter_text(
+    #     self,
+    #     chapter_text: str,
+    #     detect_emotions: bool = True
+    # ) -> List[Dict]:
+    #     """
+    #     Process chapter text into tagged segments
+        
+    #     Implements PDF requirements:
+    #     - Sentence segmentation (spaCy)
+    #     - Dialogue detection (quotation marks)
+    #     - Speaker identification (reporting verbs)
+    #     - Emotion detection (GoEmotions)
+        
+    #     Returns:
+    #         List of segment dicts with mandatory format
+    #     """
+    #     # Step 3: Normalize text
+    #     self.logger.debug("Step 3/6: Normalizing text...")
+    #     normalized_text = text_service.normalize(chapter_text)
+        
+    #     # Step 4: Segment into sentences
+    #     self.logger.debug("Step 4/6: Segmenting sentences...")
+    #     sentences = self._segment_sentences(normalized_text)
+        
+    #     # Step 5-6: Process each sentence
+    #     segments = []
+    #     previous_speaker = None
+        
+    #     for sentence in sentences:
+    #         if not sentence.strip():
+    #             continue
+            
+    #         # Dialogue detection & speaker identification
+    #         processed = dialogue_service.process_sentence(sentence, previous_speaker)
+            
+    #         # Gender inference
+    #         gender = speaker_service.infer_gender(processed['speaker'])
+            
+    #         # Emotion detection
+    #         if detect_emotions:
+    #             emotion = emotion_service.detect_emotion(processed['text'])
+    #         else:
+    #             emotion = "neutral"
+            
+    #         # Create segment in MANDATORY format (PDF Section 3.7)
+    #         segment = {
+    #             "speaker": processed['speaker'],
+    #             "gender": gender,
+    #             "text": processed['text'],
+    #             "emotion": emotion,
+    #             "segment_type": processed['segment_type']
+    #         }
+            
+    #         segments.append(segment)
+            
+    #         # Update previous speaker for context
+    #         if processed['segment_type'] == 'dialogue':
+    #             previous_speaker = processed['speaker']
+        
+    #     self.logger.debug(f"Created {len(segments)} segments")
+    #     return segments
     
     def _segment_sentences(self, text: str) -> List[str]:
         """
@@ -261,73 +326,89 @@ class AudiobookProcessor:
         segments: List[Dict],
         voice_assignments: Optional[Dict[str, str]] = None,
         speed: float = 1.0,
-        output_path: Optional[Path] = None
+        output_path: Optional[Path] = None,
+        emotion_intensity: float = 1.5  # ← Sweet spot
     ) -> Path:
-        """
-        Generate complete audiobook from segments
+        """Generate with NATURAL emotion prosody"""
         
-        Implements:
-        - Voice assignment based on speaker gender
-        - Emotion-aware TTS generation
-        - Audio stitching
-        
-        Args:
-            segments: List of speaker-tagged segments
-            voice_assignments: Optional custom voice mapping {speaker: voice_id}
-            speed: Global speed multiplier
-            output_path: Optional output path
-            
-        Returns:
-            Path to generated audiobook file
-        """
         start_time = time.time()
-        self.logger.info(f"Generating audiobook from {len(segments)} segments")
+        self.logger.info(f"🎭 Generating with emotion intensity: {emotion_intensity}x")
         
-        # Default voice assignments based on gender
+        # Clamp base speed
+        speed = max(0.9, min(1.1, speed))
+        
         if voice_assignments is None:
             voice_assignments = self._create_default_voice_assignments(segments)
         
         audio_files = []
         
         for i, segment in enumerate(segments, 1):
-            self.logger.info(
-                f"Generating segment {i}/{len(segments)}: "
-                f"{segment['speaker']} ({segment['emotion']})"
-            )
-            
-            # Get voice for speaker
             voice_id = voice_assignments.get(
                 segment['speaker'],
                 self._get_default_voice_for_gender(segment['gender'])
             )
             
-            # Get emotion prosody settings
-            prosody = emotion_service.get_prosody_settings(segment['emotion'])
+            # ========== CRITICAL: Enable emotion prosody ==========
+            emotion = segment.get('emotion', 'neutral')
             
-            # Combine with base speed
-            adjusted_speed = speed * prosody['speed']
-            
-            # Generate audio
-            audio_path = await tts_service.generate_speech(
-                text=segment['text'],
-                voice=voice_id,
-                speed=adjusted_speed,
-                language="en"
+            # Get prosody with intensity
+            prosody = emotion_service.get_prosody_settings(
+                emotion, 
+                intensity=emotion_intensity
             )
             
-            audio_files.append(audio_path)
+            # Apply emotion to speed (WIDER RANGE for more expressiveness)
+            adjusted_speed = speed * prosody['speed']
+            adjusted_speed = max(0.75, min(1.35, adjusted_speed))  # ±35% swing
+
+            # Add natural pause markers that XTTS interprets prosodically
+            text = segment['text']
+            if emotion in ['tender', 'romantic', 'longing', 'sad']:
+                text = text.replace('. ', '... ')
+                text = text.replace(', ', ', ')
+            elif emotion in ['passionate', 'excited', 'breathless']:
+                text = text.replace('...', '.')
+
+            self.logger.info(
+                f"Segment {i}/{len(segments)}: {segment['speaker']} "
+                f"[{emotion}] speed={adjusted_speed:.2f}"
+            )
+
+            try:
+                audio_path = await tts_service.generate_speech(
+                    text=text,
+                    voice=voice_id,
+                    speed=adjusted_speed,
+                    language="en",
+                    emotion=emotion,        # emotion-aware temperature
+                )
+                audio_files.append(audio_path)
+            except Exception as e:
+                self.logger.warning(f"Skipping segment {i}: {e}")
+                continue
         
-        # Merge all audio files
-        self.logger.info("Stitching audio segments...")
+        if not audio_files:
+            raise Exception("No audio generated")
+
+        # Collect speaker labels for the segments that actually produced audio
+        generated_speakers = []
+        file_idx = 0
+        for segment in segments:
+            if file_idx >= len(audio_files):
+                break
+            generated_speakers.append(segment['speaker'])
+            file_idx += 1
+
         final_audio = await audio_service.merge_audio_files(
             audio_files,
-            output_path=output_path
+            output_path=output_path,
+            speaker_sequence=generated_speakers,
         )
         
         generation_time = time.time() - start_time
-        
         self.logger.info(
-            f"✅ Audiobook generated in {generation_time:.1f}s: {final_audio}"
+            f"✅ Generated: {len(audio_files)}/{len(segments)} segments "
+            f"in {generation_time:.1f}s"
         )
         
         return final_audio
@@ -361,7 +442,7 @@ class AudiobookProcessor:
                 return voice['id']
         
         # Fallback to first voice
-        return settings.DEMO_VOICES[0]['id'] if settings.DEMO_VOICES else "voice1"
+        return settings.DEMO_VOICES[0]['id'] if settings.DEMO_VOICES else "voice7"
 
 
 # Global instance

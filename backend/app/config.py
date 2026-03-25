@@ -7,8 +7,7 @@
 import os
 from pathlib import Path
 from typing import Dict, List, Optional
-
-from pydantic import field_validator
+from pydantic import field_validator, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -28,8 +27,8 @@ class Settings(BaseSettings):
 
     # APPLICATION SETTINGS
 
-    APP_NAME: str = "Narrify Phase 1"
-    APP_VERSION: str = "1.0.0"
+    APP_NAME: str = "AI Multilingual Audiobook System"
+    APP_VERSION: str = "2.0.0"
     ENVIRONMENT: str = "development"  # development, production, testing
     DEBUG: bool = True
     LOG_LEVEL: str = "INFO"  # DEBUG, INFO, WARNING, ERROR, CRITICAL
@@ -71,7 +70,7 @@ class Settings(BaseSettings):
     
     TTS_MODEL_NAME: str = "tts_models/multilingual/multi-dataset/xtts_v2"
     TTS_CHUNK_SIZE: int = 200  # words per chunk
-    TTS_SAMPLE_RATE: int = 22050
+    TTS_SAMPLE_RATE: int = 24000
     USE_GPU: bool = True  # Auto-detect: True for MPS/CUDA, False for CPU
     TTS_LANGUAGE: str = "en"
 
@@ -130,8 +129,29 @@ class Settings(BaseSettings):
     # PERFORMANCE SETTINGS
 
     MAX_WORKERS: int = 4  # for concurrent processing
+    MAX_CONCURRENT_TASKS: int = 5
+    BATCH_SIZE: int = 10  # Segments per batch
     CACHE_ENABLED: bool = True
     CACHE_TTL: int = 3600  # 1 hour in seconds
+    
+    # ==================== REDIS/CACHE Settings ====================
+    REDIS_URL: str = Field(
+        default="redis://localhost:6379/0",
+        # env="REDIS_URL"
+    )
+    REDIS_CACHE_TTL: int = 3600  # 1 hour
+    
+    # ==================== Celery Settings ====================
+    CELERY_BROKER_URL: str = Field(
+        default="redis://localhost:6379/1",
+        # validation_alias="CELERY_BROKER_URL"
+    )
+    CELERY_RESULT_BACKEND: str = Field(
+        default="redis://localhost:6379/2",
+        # validation_alias="CELERY_RESULT_BACKEND"
+    )
+    CELERY_TASK_TRACK_STARTED: bool = True
+    CELERY_TASK_TIME_LIMIT: int = 3600  # 1 hour max
     
     # LOGGING SETTINGS    
 
@@ -148,9 +168,15 @@ class Settings(BaseSettings):
     # SECURITY SETTINGS
     
 
-    SECRET_KEY: str = "your-secret-key-here-change-in-production"
+    SECRET_KEY: str = Field(
+        default="your-secret-key-here-change-in-production", 
+        # validation_alias="SECRET_KEY"
+        )
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    JWT_ALGORITHM: str = "HS256"
+    JWT_ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
+    JWT_REFRESH_TOKEN_EXPIRE_DAYS: int = 7
     
     # DEMO VOICES    
 
@@ -204,11 +230,11 @@ class Settings(BaseSettings):
             "description": "Calm, soothing male voice",
         },
         {
-            "id": "voice10",
+            "id": "voice7",
             "name": "Shahzaib - male (CA)",
             "language": "en",
             "gender": "male",
-            "sample_file": "voice10_sample.wav",
+            "sample_file": "voice7_sample.wav",
             "description": "Calm, soothing male voice",
         },
     ]
@@ -247,6 +273,21 @@ class Settings(BaseSettings):
         # Ensure reasonable upload size
         if v < 1024 or v > 1073741824:  # 1KB to 1GB
             raise ValueError("MAX_UPLOAD_SIZE must be between 1KB and 1GB")
+        return v
+
+    @field_validator("SECRET_KEY")
+    @classmethod
+    def validate_secret_key(cls, v: str) -> str:
+        """Ensure secret key is strong enough in production"""
+        if len(v) < 16:
+            raise ValueError("SECRET_KEY should be at least 16 characters for security")
+        return v
+    
+    @field_validator("UPLOAD_DIR", "OUTPUT_DIR", "EMBEDDINGS_DIR", "CACHE_DIR", "LOG_DIR")
+    @classmethod
+    def create_all_directories(cls, v: Path) -> Path:
+        """Ensure all required directories exist"""
+        v.mkdir(parents=True, exist_ok=True)
         return v
 
     
@@ -291,6 +332,21 @@ class Settings(BaseSettings):
                 return f"{size_bytes:.2f} {unit}"
             size_bytes /= 1024.0
         return f"{size_bytes:.2f} TB"
+    
+    def get_language_code(self, language: str) -> str:
+        """Get NLLB language code from human-readable name"""
+        lang_lower = language.lower()
+        if lang_lower in self.SUPPORTED_LANGUAGES:
+            return self.SUPPORTED_LANGUAGES[lang_lower]
+        raise ValueError(f"Unsupported language: {language}")
+    
+    def get_voice_embedding_path(self, voice_id: str) -> Path:
+        """Get path to voice embedding file"""
+        return self.EMBEDDINGS_DIR / f"{voice_id}.pt"
+    
+    def is_production(self) -> bool:
+        """Check if running in production"""
+        return self.ENVIRONMENT.lower() == "production"
 
     EMOTION_MODEL: str = "j-hartmann/emotion-english-distilroberta-base"
     
@@ -300,6 +356,25 @@ class Settings(BaseSettings):
     # Multi-Speaker Detection
     ENABLE_SPEAKER_DETECTION: bool = True
     ENABLE_EMOTION_DETECTION: bool = True
+    NLLB_MODEL: str = "facebook/nllb-200-distilled-600M"
+    NLLB_DEVICE: str = Field(
+        default="cuda", 
+        # validation_alias="NLLB_DEVICE"
+        )
+    
+    # Supported language codes (NLLB format)
+    SUPPORTED_LANGUAGES: Dict[str, str] = {
+        "english": "eng_Latn",
+        "german": "deu_Latn",
+        "urdu": "urd_Arab",
+        "hindi": "hin_Deva",
+        "spanish": "spa_Latn",
+        "french": "fra_Latn",
+        "arabic": "arb_Arab",
+        "chinese": "zho_Hans",
+        "japanese": "jpn_Jpan",
+        "korean": "kor_Hang",
+    }
     
     # Speaker Gender Mapping (extend as needed)
     DEFAULT_CHARACTER_GENDERS: Dict[str, str] = {
@@ -310,6 +385,32 @@ class Settings(BaseSettings):
         "narrator": "neutral",
         # Add more as needed
     }
+    
+    # ==================== File Storage Settings ====================
+    EMBEDDINGS_DIR: Path = BASE_DIR / "data" / "embeddings"
+    
+    # Voice profiles (stored in embeddings directory)
+    DEFAULT_VOICES: Dict[str, dict] = {
+        "narrator": {
+            "id": "narrator_default",
+            "gender": "neutral",
+            "embedding_file": "narrator_neutral.pt"
+        },
+        "male": {
+            "id": "male_default",
+            "gender": "male",
+            "embedding_file": "male_voice.pt"
+        },
+        "female": {
+            "id": "female_default",
+            "gender": "female",
+            "embedding_file": "female_voice.pt"
+        }
+    }
+    
+    # ==================== TTS Settings (XTTS v2) ====================
+    TTS_MODEL: str = "tts_models/multilingual/multi-dataset/xtts_v2"
+    TTS_DEVICE: str = Field(default="cuda", validation_alias="TTS_DEVICE")
 
 # GLOBAL SETTINGS INSTANCE
 
@@ -322,6 +423,7 @@ settings.VOICE_DIR.mkdir(parents=True, exist_ok=True)
 settings.CACHE_DIR.mkdir(parents=True, exist_ok=True)
 settings.LOG_DIR.mkdir(parents=True, exist_ok=True)
 settings.MODEL_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+settings.EMBEDDINGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # EXPORT
 

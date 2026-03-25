@@ -1,25 +1,143 @@
-TTS==0.22.0
-torch==2.1.0
-torchaudio==2.1.0
-transformers==4.33.0
-librosa==0.10.1
-soundfile==0.12.1
-pydub==0.25.1
-scipy==1.11.4
-fastapi==0.104.1
-uvicorn[standard]==0.24.0
-pydantic==2.5.0
-pydantic-settings==2.1.0
+# ============================================================
+# Production Requirements - AI Audiobook System
+# ============================================================
+
+# Core Framework
+fastapi==0.109.0
+uvicorn[standard]==0.27.0
 python-multipart==0.0.6
-PyMuPDF==1.23.8
-pdfplumber==0.10.3
-pypdf==3.17.1
-num2words==0.5.13
-inflect==7.0.0
-unidecode==1.3.7
+pydantic==2.5.3
+pydantic-settings==2.1.0
+
+# Async Task Queue
+celery==5.3.4
+redis==5.0.1
+
+# Authentication & Security
+python-jose[cryptography]==3.3.0
+passlib[bcrypt]==1.7.4
 python-dotenv==1.0.0
-aiofiles==23.2.1
+
+# NLP & Text Processing
+spacy==3.7.2
+# Download model: python -m spacy download en_core_web_sm
+
+# Translation (NLLB-200)
+transformers==4.36.2
+sentencepiece==0.1.99
+protobuf==4.25.1
+
+# TTS (XTTS v2)
+TTS==0.22.0
+# Coqui TTS with XTTS v2 support
+
+# Audio Processing
+pydub==0.25.1
+librosa==0.10.0
+soundfile==0.12.1
+pyloudnorm>=0.1.1      # broadcast LUFS normalization
+num2words>=0.5.13      # number-to-spoken-word for TTS pre-processing
+# Note: ffmpeg required (install via system package manager)
+
+# ML Framework
+torch==2.1.2
+torchaudio==2.1.2
+# For CPU: torch==2.1.2+cpu -f https://download.pytorch.org/whl/cpu/torch_stable.html
+# For CUDA 11.8: torch==2.1.2+cu118 -f https://download.pytorch.org/whl/cu118/torch_stable.html
+
+# Emotion Detection (Optional)
+# transformers already included above
+
+# PDF Processing
+PyPDF2==3.0.1
+pdfplumber==0.10.3
+
+# Logging
 loguru==0.7.2
-pytest==7.4.3
-pytest-asyncio==0.21.1
-httpx==0.25.2
+
+# Database (if needed)
+# sqlalchemy==2.0.25
+# alembic==1.13.1
+
+# Testing
+pytest==7.4.4
+pytest-asyncio==0.23.3
+httpx==0.26.0
+
+# Monitoring & Performance
+prometheus-client==0.19.0
+
+# Rate Limiting
+slowapi>=0.1.9
+
+# Utils
+numpy>=1.23.0,<1.27.0
+scipy==1.11.4
+
+# Development
+black==23.12.1
+flake8==7.0.0
+mypy==1.8.0
+
+# ============================================================
+# Installation Instructions
+# ============================================================
+# 
+# 1. Create virtual environment:
+#    python -m venv venv
+#    source venv/bin/activate  # Linux/Mac
+#    venv\Scripts\activate     # Windows
+#
+# 2. Install PyTorch (choose based on your system):
+#    # CPU only:
+#    pip install torch==2.1.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cpu
+#    
+#    # CUDA 11.8:
+#    pip install torch==2.1.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cu118
+#
+# 3. Install other requirements:
+#    pip install -r requirements.txt
+#
+# 4. Download spaCy model:
+#    python -m spacy download en_core_web_sm
+#
+# 5. Install ffmpeg (system-level):
+#    # Ubuntu/Debian:
+#    sudo apt-get install ffmpeg
+#    
+#    # macOS:
+#    brew install ffmpeg
+#    
+#    # Windows:
+#    Download from https://ffmpeg.org/download.html
+#
+# 6. Setup Redis:
+#    # Ubuntu/Debian:
+#    sudo apt-get install redis-server
+#    sudo systemctl start redis
+#    
+#    # macOS:
+#    brew install redis
+#    brew services start redis
+#    
+#    # Or use Docker:
+#    docker run -d -p 6379:6379 redis:latest
+#
+# ============================================================
+# Environment Variables (.env file)
+# ============================================================
+#
+# SECRET_KEY=your-super-secret-key-min-32-chars
+# ENVIRONMENT=production
+# DEBUG=False
+# 
+# REDIS_URL=redis://localhost:6379/0
+# CELERY_BROKER_URL=redis://localhost:6379/1
+# CELERY_RESULT_BACKEND=redis://localhost:6379/2
+#
+# NLLB_DEVICE=cuda  # or cpu
+# TTS_DEVICE=cuda   # or cpu
+#
+# LOG_LEVEL=INFO
+#
+# ============================================================

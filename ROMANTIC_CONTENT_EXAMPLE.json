@@ -1,0 +1,232 @@
+{
+  "title": "A Heart's Desire - Romantic Scene Example",
+  "description": "Example API request for romantic audiobook with enhanced emotion intensity",
+  "usage_note": "Pass emotion_intensity parameter when calling /api/generate endpoint",
+  "base_parameters": {
+    "file_id": "pdf_12345",
+    "base_speed": 1.0,
+    "emotion_intensity": 1.5,
+    "comment": "1.5x = recommended for romantic content, 2.0 = maximum intensity, 1.0 = normal"
+  },
+  "chapters": [
+    {
+      "chapter_id": "ch_1",
+      "chapter_title": "First Meeting",
+      "segments": [
+        {
+          "speaker": "Narrator",
+          "gender": "female",
+          "text": "The rain fell softly against the café windows as she looked up from her book.",
+          "emotion": "calm",
+          "segment_type": "narrative"
+        },
+        {
+          "speaker": "Narrator",
+          "gender": "female",
+          "text": "He walked in, shaking droplets from his coat, completely unaware that his life was about to change forever.",
+          "emotion": "neutral",
+          "segment_type": "narrative"
+        }
+      ]
+    },
+    {
+      "chapter_id": "ch_2",
+      "chapter_title": "The Confession",
+      "segments": [
+        {
+          "speaker": "Narrator",
+          "gender": "female",
+          "text": "Three years had passed. Three years of stolen glances, late-night conversations, and a love that neither dared to speak.",
+          "emotion": "longing",
+          "segment_type": "narrative"
+        },
+        {
+          "speaker": "Hero",
+          "gender": "male",
+          "text": "I can't keep pretending anymore. I've loved you since the moment I saw you.",
+          "emotion": "passionate",
+          "segment_type": "dialogue"
+        },
+        {
+          "speaker": "Heroine",
+          "gender": "female",
+          "text": "I... I never thought you'd feel the same way.",
+          "emotion": "tender",
+          "segment_type": "dialogue"
+        }
+      ]
+    },
+    {
+      "chapter_id": "ch_3",
+      "chapter_title": "The Kiss",
+      "segments": [
+        {
+          "speaker": "Narrator",
+          "gender": "female",
+          "text": "He stepped closer, his heart pounding so loudly he thought she might hear it.",
+          "emotion": "nervous",
+          "segment_type": "narrative"
+        },
+        {
+          "speaker": "Narrator",
+          "gender": "female",
+          "text": "She reached up, her fingers trembling as they found his face.",
+          "emotion": "romantic",
+          "segment_type": "narrative"
+        },
+        {
+          "speaker": "Narrator",
+          "gender": "female",
+          "text": "Their lips met in a kiss that made the world disappear.",
+          "emotion": "romantic",
+          "segment_type": "narrative"
+        }
+      ]
+    },
+    {
+      "chapter_id": "ch_4",
+      "chapter_title": "Sensual Moment",
+      "segments": [
+        {
+          "speaker": "Hero",
+          "gender": "male",
+          "text": "You're so beautiful.",
+          "emotion": "sensual",
+          "segment_type": "dialogue"
+        },
+        {
+          "speaker": "Narrator",
+          "gender": "female",
+          "text": "She whispered his name as he pulled her close.",
+          "emotion": "sensual",
+          "segment_type": "narrative"
+        },
+        {
+          "speaker": "Heroine",
+          "gender": "female",
+          "text": "I never want to let you go.",
+          "emotion": "love",
+          "segment_type": "dialogue"
+        }
+      ]
+    },
+    {
+      "chapter_id": "ch_5",
+      "chapter_title": "Heartbreak (Optional)",
+      "segments": [
+        {
+          "speaker": "Narrator",
+          "gender": "female",
+          "text": "But nothing gold can stay. A letter arrived on a Tuesday morning.",
+          "emotion": "serious",
+          "segment_type": "narrative"
+        },
+        {
+          "speaker": "Heroine",
+          "gender": "female",
+          "text": "I have to go. My father is ill. I don't know when I'll come back.",
+          "emotion": "heartbroken",
+          "segment_type": "dialogue"
+        },
+        {
+          "speaker": "Hero",
+          "gender": "male",
+          "text": "How long?",
+          "emotion": "anxious",
+          "segment_type": "dialogue"
+        },
+        {
+          "speaker": "Heroine",
+          "gender": "female",
+          "text": "I don't know. I just... I'm sorry.",
+          "emotion": "heartbroken",
+          "segment_type": "dialogue"
+        }
+      ]
+    },
+    {
+      "chapter_id": "ch_6",
+      "chapter_title": "Reunion",
+      "segments": [
+        {
+          "speaker": "Narrator",
+          "gender": "female",
+          "text": "Months passed like an eternity. Then one spring morning, she was back.",
+          "emotion": "excited",
+          "segment_type": "narrative"
+        },
+        {
+          "speaker": "Heroine",
+          "gender": "female",
+          "text": "I came back. I came back to you.",
+          "emotion": "passionate",
+          "segment_type": "dialogue"
+        },
+        {
+          "speaker": "Hero",
+          "gender": "male",
+          "text": "I've been waiting for you every single day.",
+          "emotion": "passionate",
+          "segment_type": "dialogue"
+        },
+        {
+          "speaker": "Narrator",
+          "gender": "female",
+          "text": "They held each other as if they'd never let go again.",
+          "emotion": "romantic",
+          "segment_type": "narrative"
+        }
+      ]
+    }
+  ],
+  "emotion_guide": {
+    "romantic_emotions": {
+      "romantic": "For tender romantic moments - slow, soft, warm (0.9x speed, 1.1x pitch)",
+      "passionate": "For declarations and intense emotions - faster, higher (1.1x speed, 1.2x pitch)",
+      "tender": "For gentle, intimate moments - slow, soft, gentle (0.85x speed, 0.95x pitch)",
+      "love": "For expressions of love - warm, medium pace (0.95x speed, 1.05x pitch)",
+      "sensual": "For sensual scenes - slow, intimate (0.8x speed, 0.95x pitch)",
+      "longing": "For missing someone - wistful, slow (0.85x speed, 0.9x pitch)"
+    },
+    "tension_emotions": {
+      "nervous": "For tense moments - slightly faster, higher pitch (1.15x speed, 1.1x pitch)",
+      "anxious": "For anxiety - faster, higher (1.2x speed, 1.15x pitch)",
+      "excited": "For happy endings - very fast, very high (1.25x speed, 1.35x pitch)"
+    },
+    "negative_emotions": {
+      "sad": "For sad moments - slower, lower pitch (0.9x speed, 0.8x pitch)",
+      "heartbroken": "For heartbreak - very slow, low, soft (0.7x speed, 0.75x pitch)",
+      "angry": "For anger - fast, high, intense (1.25x speed, 1.25x pitch)"
+    }
+  },
+  "recommended_intensity_levels": {
+    "light_romance": 1.0,
+    "moderate_romance": 1.5,
+    "intense_romance": 2.0,
+    "very_intense_romance": 2.5
+  },
+  "api_request_example": {
+    "method": "POST",
+    "endpoint": "/api/generate",
+    "headers": {
+      "Content-Type": "application/json"
+    },
+    "body": {
+      "file_id": "pdf_12345",
+      "chapters": "[[chapters data from above]]",
+      "base_speed": 1.0,
+      "emotion_intensity": 1.5,
+      "voice_assignments": {
+        "Narrator": "voice_female_1",
+        "Hero": "voice_male_1",
+        "Heroine": "voice_female_2"
+      }
+    },
+    "response": {
+      "status": "generating",
+      "message": "Audiobook generation started with 1.5x emotion intensity",
+      "file_id": "pdf_12345",
+      "estimated_segments": 26
+    }
+  }
+}

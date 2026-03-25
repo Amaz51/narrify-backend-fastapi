@@ -1,9 +1,27 @@
-# Python
+# ===========================
+# Python bytecode / cache
+# ===========================
 __pycache__/
 *.py[cod]
 *$py.class
+*.pyo
+*.pyd
 *.so
 .Python
+
+# ===========================
+# Virtual Environment
+# ===========================
+venv/
+env/
+ENV/
+.venv/
+.env_dir/
+Pipfile.lock
+
+# ===========================
+# Installed packages / build
+# ===========================
 build/
 develop-eggs/
 dist/
@@ -21,72 +39,103 @@ wheels/
 *.egg
 MANIFEST
 
-# Virtual Environment
-venv/
-ENV/
-env/
-.venv
-
-# IDEs
-.vscode/
-.idea/
-*.swp
-*.swo
-*~
-.DS_Store
-
-# Environment Variables
+# ===========================
+# Environment variables
+# ===========================
 .env
 .env.local
-.env.*.local
+.env.*
+!.env.example
 
-
-.pdf
-*.pdf
-
-.wav
-*wav
+# ===========================
 # Logs
+# ===========================
 logs/
 *.log
+log/
 
-# Data Directories
+# ===========================
+# Cache directories
+# ===========================
+.cache/
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.ruff_cache/
+.hypothesis/
+
+# ===========================
+# Testing
+# ===========================
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
+.tox/
+nosetests.xml
+test-results/
+
+# ===========================
+# Jupyter
+# ===========================
+.ipynb_checkpoints/
+*.ipynb
+
+# ===========================
+# Data / Media / Model files
+# ===========================
 data/uploads/*
 data/outputs/*
 data/cache/*
 !data/uploads/.gitkeep
 !data/outputs/.gitkeep
 !data/cache/.gitkeep
-
-# Models
 models/
 *.pth
 *.pt
 *.ckpt
+*.bin
+*.safetensors
 
-# Testing
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
+# ===========================
+# Audio / Video / Binary
+# ===========================
+*.wav
+*.mp3
+*.mp4
+*.pdf
 
-# Jupyter
-.ipynb_checkpoints
-
-# mypy
-.mypy_cache/
-.dmypy.json
-dmypy.json
-
-# Distribution
-*.tar.gz
-*.zip
-
-# OS
-Thumbs.db
-.DS_Store
-
+# ===========================
 # Temporary files
+# ===========================
 *.tmp
 *_temp.*
 chunk_*
+*.bak
+
+# ===========================
+# Distribution
+# ===========================
+*.tar.gz
+*.zip
+
+# ===========================
+# OS
+# ===========================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+desktop.ini
+
+# ===========================
+# Editor / IDEs
+# ===========================
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

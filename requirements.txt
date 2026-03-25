@@ -19,7 +19,7 @@ pydantic-settings==2.1.0
 # ==============================================================================
 # CRITICAL: Install numpy FIRST to avoid conflicts
 # ==============================================================================
-numpy>=1.23.0,<2.0.0
+numpy==1.22.0
 
 # ==============================================================================
 # TTS & AUDIO PROCESSING (Phase 1)
@@ -82,7 +82,7 @@ black>=24.1.0
 #    pip install --upgrade pip setuptools wheel
 #
 # 3. Install numpy FIRST:
-#    pip install "numpy>=1.23.0,<2.0.0"
+#    pip install "numpy==1.22.0"
 #
 # 4. Install PyTorch (for Apple Silicon):
 #    pip install torch torchaudio
@@ -102,7 +102,7 @@ black>=24.1.0
 #
 # If you still get numpy conflicts:
 #   pip uninstall numpy -y
-#   pip install "numpy>=1.23.0,<2.0.0"
+#   pip install "numpy==1.22.0"
 #   pip install -r requirements.txt --no-deps
 #   pip install -r requirements.txt
 #
