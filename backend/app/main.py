@@ -39,8 +39,16 @@ async def lifespan(app: FastAPI):
 
     # Import services to trigger initialization
     from app.services.tts_service import tts_service
+    from app.services.evaluation_service import evaluation_service
 
     logger.info(f"TTS Model loaded: {tts_service.is_model_loaded()}")
+
+    # Pre-load evaluation models so the first /api/evaluate call doesn't time out
+    logger.info("Pre-loading evaluation models...")
+    evaluation_service._load_whisper()
+    evaluation_service._load_ser()
+    evaluation_service._load_voice_encoder()
+    logger.info("Evaluation models ready")
     logger.info("Application startup complete")
 
     yield

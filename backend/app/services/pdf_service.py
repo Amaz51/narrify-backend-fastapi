@@ -22,7 +22,10 @@ class PDFService:
         self.logger = logger.bind(name=__name__)
         self.upload_dir = settings.UPLOAD_DIR
         self.cache_dir = settings.CACHE_DIR
-        self.chapter_patterns = [re.compile(p) for p in settings.CHAPTER_PATTERNS]
+        # Compile with IGNORECASE so "chapter" / "Chapter" / "CHAPTER" all match
+        self.chapter_patterns = [
+            re.compile(p, re.IGNORECASE) for p in settings.CHAPTER_PATTERNS
+        ]
 
     async def extract_text(self, pdf_path: Path) -> Tuple[str, Dict, int]:
         
@@ -46,12 +49,21 @@ class PDFService:
                 "mod_date": doc.metadata.get("modDate", ""),
             }
 
-            # Extract text from all pages
+            # Extract text from all pages.
+            # Use a lightweight page separator that the text_service can strip
+            # without leaving artefacts in the speech text.  The separator must
+            # NOT contain sentence-ending punctuation so it never confuses the
+            # sentence segmenter.
             text_content = ""
             for page_num in range(page_count):
                 page = doc[page_num]
                 text = page.get_text("text")
-                text_content += f"\n\n--- Page {page_num + 1} ---\n\n{text}"
+                # Separate pages with a double newline only — no inline marker
+                # that could be mistaken for a chapter heading or sentence end.
+                if page_num == 0:
+                    text_content = text
+                else:
+                    text_content += "\n\n" + text
 
             doc.close()
 
@@ -155,11 +167,12 @@ class PDFService:
         return chapters
 
     def _extract_page_number(self, text: str) -> Optional[int]:
-        
-        # Extract page number from text
-        match = re.search(r"--- Page (\d+) ---", text)
+        """Extract page number from a chapter title line if it contains one,
+        otherwise return None (chapter_id is used as fallback in the UI)."""
+        match = re.search(r"\b(\d+)\b", text)
         if match:
-            return int(match.group(1))
+            val = int(match.group(1))
+            return val if val > 0 else None
         return None
 
     async def process_pdf(self, file_path: Path) -> PDFDocument:

@@ -84,13 +84,22 @@ class Settings(BaseSettings):
     MAX_PITCH: int = 12
     AVAILABLE_TONES: List[str] = ["normal", "warm", "bright", "deep"]
 
-    # PDF PROCESSING SETTING    
-    # Chapter detection patterns
+    # PDF PROCESSING SETTING
+    # Chapter detection patterns — matched against stripped lines.
+    # Ordered from most specific to least specific.
     CHAPTER_PATTERNS: List[str] = [
-        r"^Chapter\s+\d+",
-        r"^CHAPTER\s+\d+",
-        r"^\d+\.\s+[A-Z]",
-        r"^Part\s+\d+",
+        # "Chapter 1" / "CHAPTER 1" / "Chapter 1:" / "CHAPTER ONE"
+        r"^(?:Chapter|CHAPTER)\s+(?:\d+|[A-Z][a-z]+)(?:\s*[:\-—].*)?$",
+        # "Part 1" / "PART ONE"
+        r"^(?:Part|PART)\s+(?:\d+|[A-Z][a-z]+)(?:\s*[:\-—].*)?$",
+        # Numbered heading: "1. Title" or "1 Title" (no dot)
+        r"^\d+(?:\.)?\s+[A-Z][A-Za-z\s]{2,}$",
+        # Standalone structural labels (PROLOGUE, EPILOGUE, etc.)
+        r"^(?:PROLOGUE|EPILOGUE|INTRODUCTION|PREFACE|FOREWORD|AFTERWORD|"
+        r"ACKNOWLEDGEMENTS?|APPENDIX|INTERLUDE|CODA)(?:\s*[:\-—].*)?$",
+        # Title-case labels (Prologue, Epilogue, …)
+        r"^(?:Prologue|Epilogue|Introduction|Preface|Foreword|Afterword|"
+        r"Acknowledgements?|Appendix|Interlude|Coda)(?:\s*[:\-—].*)?$",
     ]
 
     # Text cleaning
@@ -182,60 +191,103 @@ class Settings(BaseSettings):
 
     DEMO_VOICES: List[dict] = [
         {
-            "id": "voice1",
-            "name": "Sarah - Female (US)",
-            "language": "en",
-            "gender": "female",
-            "sample_file": "voice1_sample.wav",
-            "description": "Clear, professional female voice",
-        },
-        {
             "id": "voice2",
-            "name": "Maryam - Female (UK)",
+            "name": "Maryam",
             "language": "en",
             "gender": "female",
+            "mood": "Authoritative",
+            "type": "Natural",
+            "featured": True,
             "sample_file": "voice2_sample.wav",
-            "description": "Deep, authoritative female voice",
+            "description": "Deep, authoritative female voice ideal for non-fiction",
         },
         {
             "id": "voice3",
-            "name": "James - male (AU)",
+            "name": "James",
             "language": "en",
             "gender": "male",
+            "mood": "Warm & Friendly",
+            "type": "Neural",
+            "featured": True,
             "sample_file": "voice3_sample.wav",
-            "description": "Warm, friendly, deep male voice",
-        },
-        {
-            "id": "voice4",
-            "name": "Abdullah - Male (pakistan)",
-            "language": "en",
-            "gender": "male",
-            "sample_file": "voice4_sample.wav",
-            "description": "noise male voice",
-        },
-        {
-            "id": "voice5",
-            "name": "Olivia - Female (CA)",
-            "language": "en",
-            "gender": "female",
-            "sample_file": "voice7_sample.wav",
-            "description": "Calm, soothing female voice",
+            "description": "Warm, friendly, deep male voice great for storytelling",
         },
         {
             "id": "voice6",
-            "name": "Men - male (CA)",
+            "name": "Michael",
             "language": "en",
             "gender": "male",
+            "mood": "Deep & Calm",
+            "type": "Neural",
+            "featured": False,
             "sample_file": "voice6_sample.wav",
-            "description": "Calm, soothing male voice",
+            "description": "Deep, calm male voice with measured pacing",
         },
         {
             "id": "voice7",
-            "name": "Shahzaib - male (CA)",
+            "name": "Shahzaib",
             "language": "en",
             "gender": "male",
+            "mood": "Storyteller",
+            "type": "Natural",
+            "featured": False,
             "sample_file": "voice7_sample.wav",
-            "description": "Calm, soothing male voice",
+            "description": "Engaging storyteller voice with natural rhythm",
+        },
+        {
+            "id": "ivy",
+            "name": "Ivy",
+            "language": "en",
+            "gender": "female",
+            "mood": "Sophisticated",
+            "type": "Studio",
+            "featured": True,
+            "sample_file": "Ivy - sophisticated english.mp3",
+            "description": "Sophisticated, refined female voice with elegant delivery",
+        },
+        {
+            "id": "dallin",
+            "name": "Dallin",
+            "language": "en",
+            "gender": "male",
+            "mood": "Inspiring",
+            "type": "Natural",
+            "featured": False,
+            "sample_file": "dallin - english male inspiring.mp3",
+            "description": "Uplifting, inspiring male voice with motivational energy",
+        },
+        {
+            "id": "lauran",
+            "name": "Lauran",
+            "language": "en",
+            "gender": "female",
+            "mood": "Friendly",
+            "type": "Neural",
+            "featured": True,
+            "sample_file": "lauran - friendly english.mp3",
+            "description": "Warm, approachable female voice with a conversational tone",
+        },
+        {
+            "id": "sara",
+            "name": "Sara",
+            "language": "en",
+            "gender": "female",
+            "mood": "Expressive",
+            "type": "Natural",
+            "featured": False,
+            "sample_file": "sara-indian accent.mp3",
+            "description": "Expressive female voice with a distinct South Asian accent",
+        },
+        {
+            "id": "victoria",
+            "name": "Victoria",
+            "language": "en",
+            "gender": "female",
+            "mood": "Elegant",
+            "type": "Studio",
+            "featured": False,
+            "sample_file": "victoria-english.mp3",
+            "description": "Polished, elegant female voice with precise enunciation",
         },
     ]
 
@@ -304,8 +356,8 @@ class Settings(BaseSettings):
 
     def get_cors_origins(self) -> List[str]:
         # Get CORS allowed origins
-        if self.is_development():
-            return self.ALLOWED_ORIGINS + ["*"]
+        # NOTE: Do NOT add "*" here — combining "*" with allow_credentials=True
+        # is invalid per the CORS spec and browsers will reject all responses.
         return self.ALLOWED_ORIGINS
 
     def get_device(self) -> str:
@@ -344,10 +396,6 @@ class Settings(BaseSettings):
         """Get path to voice embedding file"""
         return self.EMBEDDINGS_DIR / f"{voice_id}.pt"
     
-    def is_production(self) -> bool:
-        """Check if running in production"""
-        return self.ENVIRONMENT.lower() == "production"
-
     EMOTION_MODEL: str = "j-hartmann/emotion-english-distilroberta-base"
     
     # NLP Model
@@ -358,7 +406,7 @@ class Settings(BaseSettings):
     ENABLE_EMOTION_DETECTION: bool = True
     NLLB_MODEL: str = "facebook/nllb-200-distilled-600M"
     NLLB_DEVICE: str = Field(
-        default="cuda", 
+        default="cpu", 
         # validation_alias="NLLB_DEVICE"
         )
     
@@ -410,7 +458,7 @@ class Settings(BaseSettings):
     
     # ==================== TTS Settings (XTTS v2) ====================
     TTS_MODEL: str = "tts_models/multilingual/multi-dataset/xtts_v2"
-    TTS_DEVICE: str = Field(default="cuda", validation_alias="TTS_DEVICE")
+    TTS_DEVICE: str = Field(default="cpu", validation_alias="TTS_DEVICE")
 
 # GLOBAL SETTINGS INSTANCE
 

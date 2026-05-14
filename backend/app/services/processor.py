@@ -13,7 +13,6 @@ from loguru import logger
 import time
 
 from app.services.pdf_service import pdf_service
-from app.services.text_service import text_service
 from app.services.nlp.dialogue_service import dialogue_service
 from app.services.nlp.speaker_service import speaker_service
 from app.services.nlp.emotion_engine import emotion_service
@@ -195,7 +194,7 @@ class AudiobookProcessor:
         """
         # Step 3: Normalize text
         self.logger.debug("Step 3/6: Normalizing text...")
-        normalized_text = text_service.normalize(chapter_text)
+        normalized_text = tts_service._clean_text(chapter_text)
 
         # Step 4: Segment into sentences
         self.logger.debug("Step 4/6: Segmenting sentences...")
@@ -327,7 +326,8 @@ class AudiobookProcessor:
         voice_assignments: Optional[Dict[str, str]] = None,
         speed: float = 1.0,
         output_path: Optional[Path] = None,
-        emotion_intensity: float = 1.5  # ← Sweet spot
+        emotion_intensity: float = 1.5,
+        language: str = "en",
     ) -> Path:
         """Generate with NATURAL emotion prosody"""
         
@@ -379,7 +379,7 @@ class AudiobookProcessor:
                     text=text,
                     voice=voice_id,
                     speed=adjusted_speed,
-                    language="en",
+                    language=language,
                     emotion=emotion,        # emotion-aware temperature
                 )
                 audio_files.append(audio_path)

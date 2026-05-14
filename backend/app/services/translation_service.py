@@ -73,7 +73,7 @@ class TranslationService:
         # Initialize Redis cache (optional)
         try:
             self.cache = redis.from_url(
-                "redis://localhost:6379/0",
+                settings.REDIS_URL,
                 decode_responses=True
             )
             self.cache.ping()

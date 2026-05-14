@@ -62,6 +62,19 @@ tqdm>=4.66.0
 loguru>=0.7.0
 
 # ==============================================================================
+# VOICE EVALUATION METRICS
+# ==============================================================================
+# WER / CER via Whisper ASR + jiwer
+openai-whisper>=20231117
+jiwer>=3.0.0
+
+# Speaker Encoder Cosine Similarity (SECS)
+resemblyzer>=0.1.1.dev0
+
+# Predicted MOS — uncomment to enable accurate UTMOS (falls back to energy proxy otherwise)
+# utmos22>=0.0.3
+
+# ==============================================================================
 # DEVELOPMENT & TESTING
 # ==============================================================================
 pytest>=7.4.0

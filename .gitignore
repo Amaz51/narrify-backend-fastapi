@@ -1,6 +1,6 @@
-# ===========================
+
 # Python bytecode / cache
-# ===========================
+
 __pycache__/
 *.py[cod]
 *$py.class
@@ -9,9 +9,9 @@ __pycache__/
 *.so
 .Python
 
-# ===========================
+
 # Virtual Environment
-# ===========================
+
 venv/
 env/
 ENV/
@@ -19,9 +19,9 @@ ENV/
 .env_dir/
 Pipfile.lock
 
-# ===========================
+
 # Installed packages / build
-# ===========================
+
 build/
 develop-eggs/
 dist/
@@ -39,24 +39,24 @@ wheels/
 *.egg
 MANIFEST
 
-# ===========================
+
 # Environment variables
-# ===========================
+
 .env
 .env.local
 .env.*
 !.env.example
 
-# ===========================
+
 # Logs
-# ===========================
+
 logs/
 *.log
 log/
 
-# ===========================
+
 # Cache directories
-# ===========================
+
 .cache/
 .mypy_cache/
 .dmypy.json
@@ -64,9 +64,9 @@ dmypy.json
 .ruff_cache/
 .hypothesis/
 
-# ===========================
+
 # Testing
-# ===========================
+
 .pytest_cache/
 .coverage
 htmlcov/
@@ -75,15 +75,15 @@ coverage.xml
 nosetests.xml
 test-results/
 
-# ===========================
+
 # Jupyter
-# ===========================
+
 .ipynb_checkpoints/
 *.ipynb
 
-# ===========================
+
 # Data / Media / Model files
-# ===========================
+
 data/uploads/*
 data/outputs/*
 data/cache/*
@@ -97,31 +97,31 @@ models/
 *.bin
 *.safetensors
 
-# ===========================
+
 # Audio / Video / Binary
-# ===========================
+
 *.wav
 *.mp3
 *.mp4
 *.pdf
 
-# ===========================
+
 # Temporary files
-# ===========================
+
 *.tmp
 *_temp.*
 chunk_*
 *.bak
 
-# ===========================
+
 # Distribution
-# ===========================
+
 *.tar.gz
 *.zip
 
-# ===========================
+
 # OS
-# ===========================
+
 .DS_Store
 .DS_Store?
 ._*
@@ -131,9 +131,9 @@ Thumbs.db
 ehthumbs.db
 desktop.ini
 
-# ===========================
+
 # Editor / IDEs
-# ===========================
+
 .idea/
 .vscode/
 *.swp

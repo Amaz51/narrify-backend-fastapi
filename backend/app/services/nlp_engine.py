@@ -8,7 +8,7 @@ import spacy
 from typing import List, Dict, Optional, Tuple
 from loguru import logger
 
-from app.core.config import settings
+from app.config import settings
 from app.models.schemas import SpeakerSegment, Gender, SegmentType, EmotionLabel
 
 
@@ -327,5 +327,10 @@ class NLPEngine:
         }
 
 
-# Global instance
-nlp_engine = NLPEngine()
+# NOTE: NLPEngine is not used by the active pipeline (processor.py uses
+# dialogue_service + speaker_service directly). Instantiation is deferred
+# to avoid loading spaCy on every import and to prevent crashes when the
+# model is not downloaded.
+# If you need to use this class, instantiate it manually:
+#   from app.services.nlp_engine import NLPEngine
+#   nlp_engine = NLPEngine()

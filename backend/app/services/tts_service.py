@@ -186,8 +186,9 @@ class TTSService:
         text = re.sub(r'\s*[—–]\s*', ', ', text)      # em/en-dash → pause
         text = re.sub(r'\.{2,}', '...', text)           # normalise ellipsis
 
-        # 8. Strip characters XTTS can't handle
-        text = re.sub(r'[^\w\s\.,!?\-\'\"…]', '', text)
+        # 8. Strip characters XTTS can't handle — preserve Unicode letters/digits
+        # \w in Python 3 already matches Unicode word chars (Urdu, Arabic, etc.)
+        text = re.sub(r'[^\w\s\.,!?\-\'\"…]', '', text, flags=re.UNICODE)
         text = re.sub(r'\s+', ' ', text).strip()
 
         # Ensure terminal punctuation
@@ -278,6 +279,102 @@ class TTSService:
 
         except Exception as e:
             self.logger.error(f"Sync generation failed: {e}")
+            raise
+
+    def get_voice_conditioning_latents(self, voice_id: str):
+        """
+        Pre-compute XTTS conditioning latents for a voice.
+        Returns (gpt_cond_latent, speaker_embedding) tuple, or None on failure.
+        Call once per unique voice before the generation loop to avoid reloading
+        the speaker WAV on every segment.
+        """
+        try:
+            speaker_wav = self._get_voice_sample_path(voice_id)
+            xtts_model = self.model.synthesizer.tts_model
+            gpt_cond_latent, speaker_embedding = xtts_model.get_conditioning_latents(
+                audio_path=[speaker_wav]
+            )
+            return gpt_cond_latent, speaker_embedding
+        except Exception as e:
+            self.logger.warning(f"Could not compute conditioning latents for {voice_id}: {e}")
+            return None
+
+    async def generate_speech_fast(
+        self,
+        text: str,
+        gpt_cond_latent,
+        speaker_embedding,
+        speed: float = 1.0,
+        language: str = "en",
+        emotion: str = "neutral",
+        output_path: Optional[Path] = None,
+    ) -> Path:
+        """
+        Generate speech using pre-computed conditioning latents (fast path).
+        Skips the speaker WAV loading + embedding step that runs in the standard path.
+        """
+        try:
+            text = self._clean_text(text)
+            temperature = self._get_emotion_temperature(emotion)
+
+            if output_path is None:
+                audio_id = str(uuid.uuid4())[:12]
+                output_path = self.output_dir / f"{audio_id}.wav"
+
+            start_time = time.time()
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(
+                None,
+                self._generate_audio_fast_sync,
+                text,
+                gpt_cond_latent,
+                speaker_embedding,
+                str(output_path),
+                language,
+                speed,
+                temperature,
+            )
+
+            generation_time = time.time() - start_time
+            self.logger.info(f"Fast speech generated in {generation_time:.2f}s: {output_path}")
+            return output_path
+
+        except Exception as e:
+            self.logger.error(f"Fast speech generation failed: {e}")
+            raise Exception(f"TTS fast generation failed: {str(e)}")
+
+    def _generate_audio_fast_sync(
+        self,
+        text: str,
+        gpt_cond_latent,
+        speaker_embedding,
+        output_path: str,
+        language: str,
+        speed: float,
+        temperature: float = 0.75,
+    ):
+        """Synchronous fast audio generation using pre-computed latents."""
+        import soundfile as sf
+        import numpy as np
+
+        try:
+            xtts_model = self.model.synthesizer.tts_model
+            out = xtts_model.inference(
+                text=text,
+                language=language,
+                gpt_cond_latent=gpt_cond_latent,
+                speaker_embedding=speaker_embedding,
+                speed=speed,
+                temperature=temperature,
+                length_penalty=1.0,
+                repetition_penalty=5.0,
+                top_k=50,
+                top_p=0.85,
+            )
+            wav = np.array(out["wav"])
+            sf.write(output_path, wav.astype("float32"), self.sample_rate)
+        except Exception as e:
+            self.logger.error(f"Fast sync generation failed: {e}")
             raise
 
     def _get_voice_sample_path(self, voice_id: str) -> str:

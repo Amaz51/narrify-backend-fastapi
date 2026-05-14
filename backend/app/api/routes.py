@@ -46,13 +46,15 @@ from app.models.schemas import (
     SpeakerSegment,
     EmotionStatistics,
     SpeakerStatistics,
+    # Evaluation
+    EvaluationResponse,
 )
 
 # Phase 1 Services (Original)
 from app.services.audio_service import audio_service
 from app.services.pdf_service import pdf_service
-from app.services.text_service import text_service
 from app.services.tts_service import tts_service
+from app.services.evaluation_service import evaluation_service
 
 # Phase 2 Services (NEW)
 try:
@@ -157,6 +159,11 @@ async def upload_pdf(request: Request, file: UploadFile = File(..., description=
         # Detect chapters
         chapters = pdf_service.detect_chapters(pdf_doc.text_content)
 
+        # Clear stale cache entries before storing new ones (ensures re-uploads always get fresh data)
+        pdf_cache.clear()
+        chapter_cache.clear()
+        segment_cache.clear()
+
         # Cache results
         pdf_cache[pdf_doc.file_id] = pdf_doc
         chapter_cache[pdf_doc.file_id] = chapters
@@ -246,29 +253,66 @@ async def get_chapters(file_id: str):
 
 @router.get(
     "/voices",
-    response_model=VoicesResponse,
     summary="Get Voices",
     description="Get list of available voices",
 )
 async def get_voices():
-    """Returns list of voice options"""
+    """Returns list of all voice options including custom clones"""
     try:
         voices_data = tts_service.get_available_voices()
 
-        voices = [
-            VoiceInfo(
-                id=v["id"],
-                name=v["name"],
-                language=v["language"],
-                gender=v["gender"],
-                description=v["description"],
-                sample_url=v.get("sample_url"),
-                is_custom=False,
-            )
-            for v in voices_data
-        ]
+        # Build voice list from demo voices
+        result = []
+        for v in voices_data:
+            result.append({
+                "voice_id": v["id"],
+                "voice_name": v["name"],
+                "id": v["id"],
+                "name": v["name"],
+                "language": v["language"],
+                "gender": v["gender"],
+                "type": v.get("type", "Neural"),
+                "mood": v.get("mood", "Natural"),
+                "featured": v.get("featured", False),
+                "description": v.get("description", ""),
+                "sample_url": f"/api/voices/{v['id']}/sample",
+                "is_custom": False,
+            })
 
-        return VoicesResponse(voices=voices, total_voices=len(voices))
+        # Append custom cloned voices
+        try:
+            import torch as _torch
+            embeddings_dir = settings.EMBEDDINGS_DIR
+            if embeddings_dir.exists():
+                for pt_file in sorted(embeddings_dir.glob("custom_*.pt")):
+                    voice_id = pt_file.stem
+                    voice_name = f"Custom Voice ({voice_id[:8]})"
+                    gender = "neutral"
+                    try:
+                        meta = _torch.load(str(pt_file), map_location="cpu", weights_only=False)
+                        if isinstance(meta, dict) and "voice_name" in meta:
+                            voice_name = meta["voice_name"]
+                            gender = meta.get("gender", "neutral")
+                    except Exception:
+                        pass
+                    result.append({
+                        "voice_id": voice_id,
+                        "voice_name": voice_name,
+                        "id": voice_id,
+                        "name": voice_name,
+                        "language": "en",
+                        "gender": gender,
+                        "type": "Cloned",
+                        "mood": "Custom Clone",
+                        "featured": False,
+                        "description": "Your custom cloned voice",
+                        "sample_url": f"/api/voices/{voice_id}/sample",
+                        "is_custom": True,
+                    })
+        except Exception as e:
+            logger.warning(f"Could not load custom voices: {e}")
+
+        return {"voices": result, "total": len(result), "total_voices": len(result)}
 
     except Exception as e:
         logger.error(f"Failed to get voices: {e}")
@@ -285,31 +329,35 @@ async def get_voices():
     responses={404: {"description": "Voice sample not found"}},
 )
 async def get_voice_sample(voice_id: str):
-    """Get voice sample audio"""
+    """Get voice sample audio — works for both default voices and custom clones"""
     try:
-        # Find voice config
+        # 1. Check demo / default voices first
         voice_config = next(
             (v for v in settings.DEMO_VOICES if v["id"] == voice_id), None
         )
+        if voice_config:
+            sample_path = settings.VOICE_DIR / voice_config["sample_file"]
+            if sample_path.exists():
+                ext = sample_path.suffix.lower()
+                media_type = "audio/mpeg" if ext == ".mp3" else "audio/wav"
+                return FileResponse(
+                    path=sample_path,
+                    media_type=media_type,
+                    filename=f"{voice_id}_sample{ext}",
+                )
 
-        if not voice_config:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"Voice not found: {voice_id}",
+        # 2. Check custom cloned voices (embeddings dir has custom_<id>.wav)
+        cloned_wav = settings.EMBEDDINGS_DIR / f"{voice_id}.wav"
+        if cloned_wav.exists():
+            return FileResponse(
+                path=cloned_wav,
+                media_type="audio/wav",
+                filename=f"{voice_id}_sample.wav",
             )
 
-        sample_path = settings.VOICE_DIR / voice_config["sample_file"]
-
-        if not sample_path.exists():
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail="Voice sample not available",
-            )
-
-        return FileResponse(
-            path=sample_path,
-            media_type="audio/wav",
-            filename=f"{voice_id}_sample.wav",
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No sample found for voice: {voice_id}",
         )
 
     except HTTPException:
@@ -372,15 +420,7 @@ async def generate_audio(request: AudioGenerationRequest):
                 status_code=status.HTTP_400_BAD_REQUEST, detail=error_msg
             )
 
-        # Normalize text
-        normalized_text = text_service.normalize(chapter.content)
-
-        # Validate normalized text
-        is_valid, error_msg = text_service.validate_text(normalized_text)
-        if not is_valid:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST, detail=error_msg
-            )
+        normalized_text = chapter.content
 
         # Generate speech (with chunking for long chapters)
         if chapter.word_count > settings.TTS_CHUNK_SIZE:
@@ -593,47 +633,47 @@ async def get_statistics():
     responses={404: {"model": ErrorResponse, "description": "File not found"}},
 )
 @limiter.limit("10/minute")
-async def process_pdf_v2(http_request: Request, request: ProcessingRequestV2):
+async def process_pdf_v2(request: Request, body: ProcessingRequestV2):
     """
     **NEW: Multi-Speaker Emotion-Aware Processing**
-    
+
     Process PDF with:
     - Dialogue detection
     - Speaker identification
     - Emotion analysis
     - Gender inference
-    
+
     Returns speaker-tagged, emotion-labeled segments
     """
     try:
-        logger.info(f"Processing v2: {request.file_id}")
-        
+        logger.info(f"Processing v2: {body.file_id}")
+
         # CRITICAL FIX: Use cached data instead of looking for file
-        if request.file_id not in chapter_cache:
+        if body.file_id not in chapter_cache:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
-                detail=f"File not found in cache: {request.file_id}. Please upload PDF first using /api/upload",
+                detail=f"File not found in cache: {body.file_id}. Please upload PDF first using /api/upload",
             )
-        
+
         # Get cached data
-        chapters = chapter_cache[request.file_id]
-        pdf_doc = pdf_cache.get(request.file_id)
-        
+        chapters = chapter_cache[body.file_id]
+        pdf_doc = pdf_cache.get(body.file_id)
+
         if not pdf_doc:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="PDF document not found in cache",
             )
-        
+
         # Process using cached data (NOT file path)
         result = await audiobook_processor.process_pdf_from_cache(
             pdf_doc=pdf_doc,
             chapters=chapters,
-            detect_emotions=request.detect_emotions
+            detect_emotions=body.detect_emotions
         )
-        
+
         # Cache processed segments for later use
-        segment_cache[request.file_id] = result
+        segment_cache[body.file_id] = result
         
         logger.info(
             f"Processed {result['total_segments']} segments "
@@ -774,12 +814,25 @@ async def generate_multi_speaker(request: MultiSpeakerGenerationRequest):
             for assignment in request.voice_assignments:
                 voice_assignments[assignment.speaker_name] = assignment.voice_id
         
+        # Resolve TTS language code from the target language name.
+        # XTTS uses ISO 639-1 codes; fall back to "en" for any unknown language.
+        _LANG_TO_XTTS = {
+            "english": "en", "spanish": "es", "french": "fr", "german": "de",
+            "italian": "it", "portuguese": "pt", "polish": "pl", "turkish": "tr",
+            "russian": "ru", "dutch": "nl", "czech": "cs", "arabic": "ar",
+            "chinese": "zh-cn", "japanese": "ja", "korean": "ko", "hindi": "hi",
+            "hungarian": "hu", "urdu": "ur",
+        }
+        tts_language = _LANG_TO_XTTS.get(
+            request.target_language.lower().strip(), "en"
+        )
+
         # Generate audiobook
         output_path = await audiobook_processor.generate_audiobook(
             segments=segments,
             voice_assignments=voice_assignments if voice_assignments else None,
             speed=request.base_speed,
-            # language=request.target_language  # Pass target language to TTS
+            language=tts_language,
         )
         
         # Get audio info
@@ -825,7 +878,7 @@ async def generate_multi_speaker(request: MultiSpeakerGenerationRequest):
     description="Accepts the exact output from /process/v2 and generates multi-speaker audio",
 )
 @limiter.limit("5/minute")
-async def generate_from_processing(http_request: Request, request: dict):
+async def generate_from_processing(request: Request, body: dict):
     """
     **FIXED ENDPOINT: Accepts /process/v2 output directly**
     
@@ -841,142 +894,159 @@ async def generate_from_processing(http_request: Request, request: dict):
         import time
         
         # Extract file_id
-        file_id = request.get('file_id')
+        file_id = body.get('file_id')
         if not file_id:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="file_id is required"
             )
-        
+
         logger.info(f"Generating from processing output: {file_id}")
-        
-        # Extract segments from chapters
-        segments = []
-        
-        if 'chapters' in request and isinstance(request['chapters'], list):
-            for chapter in request['chapters']:
-                if 'segments' in chapter and isinstance(chapter['segments'], list):
-                    segments.extend(chapter['segments'])
-            logger.info(f"Extracted {len(segments)} segments from {len(request['chapters'])} chapters")
-        else:
+
+        # Extract chapters list
+        chapters_input = body.get('chapters', [])
+        if not isinstance(chapters_input, list) or not chapters_input:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No chapters found in request. Expected output from /process/v2"
             )
-        
-        if not segments:
+
+        total_segments = sum(len(ch.get('segments', [])) for ch in chapters_input)
+        if total_segments == 0:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="No segments found in chapters"
             )
-        
+
+        logger.info(f"Generating {len(chapters_input)} chapters, {total_segments} total segments")
+
         # Get optional parameters (with defaults)
-        base_speed = request.get('base_speed', 1.0)
-        apply_emotion_prosody = request.get('apply_emotion_prosody', True)
-        output_format = request.get('output_format', 'wav')
-        
-        target_language = request.get('target_language', 'english')
-        source_language = request.get('source_language', 'english')
-        
-        # NEW: Translate segments if needed
-        if target_language != source_language and target_language != 'english':
-            logger.info(f"Translating from {source_language} to {target_language}")
-            
-            try:
-                import torch
-                from transformers import pipeline
-                
-                # Language code mapping for NLLB-200
-                lang_codes = {
-                    'english': 'eng_Latn',
-                    'urdu': 'urd_Arab',
-                    'german': 'deu_Latn',
-                    'hindi': 'hin_Deva',
-                    'spanish': 'spa_Latn',
-                    'french': 'fra_Latn',
-                    'arabic': 'arb_Arab',
-                    'chinese': 'zho_Hans',
-                    'japanese': 'jpn_Jpan',
-                    'korean': 'kor_Hang'
-                }
-                
-                src_code = lang_codes.get(source_language.lower(), 'eng_Latn')
-                tgt_code = lang_codes.get(target_language.lower(), 'eng_Latn')
-                
-                # Initialize translator (GPU if available)
-                translator = pipeline(
-                    "translation",
-                    model="facebook/nllb-200-distilled-600M",
-                    device=0 if torch.cuda.is_available() else -1
-                )
-                
-                # Translate each segment
-                translated_count = 0
-                for segment in segments:
-                    try:
-                        if 'text' in segment and segment['text']:
-                            result = translator(
-                                segment['text'],
-                                src_lang=src_code,
-                                tgt_lang=tgt_code,
-                                max_length=512
-                            )
-                            segment['text'] = result[0]['translation_text']
-                            translated_count += 1
-                    except Exception as e:
-                        logger.warning(f"Failed to translate segment: {e}")
-                        # Keep original text on error
-                
-                logger.info(f"✅ Translated {translated_count} segments to {target_language}")
-                
-            except Exception as e:
-                logger.error(f"Translation service failed: {e}")
-                # Continue with original segments if translation fails
-                pass
-        
-        # Generate audiobook
-        logger.info(f"Generating multi-speaker audio for {len(segments)} segments")
+        base_speed = body.get('base_speed', 1.0)
+        apply_emotion_prosody = body.get('apply_emotion_prosody', True)
+        output_format = body.get('output_format', 'wav')
+
+        target_language = body.get('target_language', 'english')
+        source_language = body.get('source_language', 'english')
+
+        # Build human-readable output filename from title if provided
+        import re as _re
+        raw_title = body.get('title', '') or ''
+        safe_title = _re.sub(r'[^\w\s-]', '', raw_title).strip().replace(' ', '-')[:60]
+        if not safe_title:
+            safe_title = file_id[:12]
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+        named_output_path = settings.OUTPUT_DIR / f"{safe_title}_{timestamp}.wav"
         
         start_time = time.time()
-        
-        # Import here to avoid circular imports
+
         from app.services.processor import audiobook_processor
         from app.services.audio_service import audio_service
-        
-        # Build generation kwargs (language is optional)
-        generate_kwargs = {
-            'segments': segments,
-            'voice_assignments': None,  # Auto-assign by gender
-            'speed': base_speed
+
+        _LANG_TO_XTTS_FP = {
+            "english": "en", "en": "en",
+            "spanish": "es", "es": "es",
+            "french": "fr", "fr": "fr",
+            "german": "de", "de": "de",
+            "italian": "it", "it": "it",
+            "portuguese": "pt", "pt": "pt",
+            "polish": "pl", "pl": "pl",
+            "turkish": "tr", "tr": "tr",
+            "russian": "ru", "ru": "ru",
+            "dutch": "nl", "nl": "nl",
+            "czech": "cs", "cs": "cs",
+            "arabic": "ar", "ar": "ar",
+            "chinese": "zh-cn", "zh": "zh-cn",
+            "japanese": "ja", "ja": "ja",
+            "korean": "ko", "ko": "ko",
+            "hindi": "hi", "hi": "hi",
+            "hungarian": "hu", "hu": "hu",
+            # Urdu uses Arabic script — map to "ar" since XTTS v2 doesn't have "ur"
+            "urdu": "ar", "ur": "ar",
         }
-        if target_language != 'english':
-            generate_kwargs['language'] = target_language
-        
-        output_path = await audiobook_processor.generate_audiobook(**generate_kwargs)
-        
+        tts_lang_fp = _LANG_TO_XTTS_FP.get(target_language.lower().strip(), "en")
+
+        # Generate audio per chapter, then merge into one full-book file
+        chapter_results = []
+        all_chapter_paths = []
+        unique_speakers = {}
+        total_segments_processed = 0
+
+        for chapter in chapters_input:
+            ch_id = chapter.get('chapter_id', len(chapter_results) + 1)
+            ch_title = chapter.get('chapter_title', f'Chapter {ch_id}')
+            ch_segments = chapter.get('segments', [])
+            if not ch_segments:
+                continue
+
+            # Translate if needed
+            if target_language.lower().strip() != source_language.lower().strip():
+                try:
+                    from app.services.translation_service import translation_service
+                    ch_segments = translation_service.translate_segments(
+                        segments=ch_segments,
+                        source_lang=source_language,
+                        target_lang=target_language,
+                    )
+                except Exception as te:
+                    logger.warning(f"Translation failed for chapter {ch_id}: {te}")
+
+            safe_ch = f"ch{ch_id}_{safe_title}"[:60]
+            ch_output_path = settings.OUTPUT_DIR / f"{safe_ch}_{timestamp}.wav"
+
+            logger.info(f"Generating chapter {ch_id}: '{ch_title}' ({len(ch_segments)} segments)")
+            ch_path = await audiobook_processor.generate_audiobook(
+                segments=ch_segments,
+                voice_assignments=None,
+                speed=base_speed,
+                output_path=ch_output_path,
+                language=tts_lang_fp,
+            )
+
+            ch_info = audio_service.get_audio_info(ch_path)
+            all_chapter_paths.append(ch_path)
+            total_segments_processed += len(ch_segments)
+            for seg in ch_segments:
+                unique_speakers[seg['speaker']] = seg.get('gender', 'neutral')
+
+            chapter_results.append({
+                "chapter_id": ch_id,
+                "chapter_title": ch_title,
+                "audio_url": f"/api/outputs/{ch_path.name}",
+                "duration": ch_info.get('duration', 0.0),
+                "segments": len(ch_segments),
+            })
+            logger.info(f"✅ Chapter {ch_id} done: {ch_path.name}")
+
+        if not all_chapter_paths:
+            raise HTTPException(status_code=500, detail="No audio generated for any chapter")
+
+        # Merge all chapters into one full-book file
+        if len(all_chapter_paths) == 1:
+            output_path = all_chapter_paths[0]
+        else:
+            output_path = await audio_service.merge_audio_files(
+                all_chapter_paths,
+                output_path=named_output_path,
+            )
+
         generation_time = time.time() - start_time
-        
-        # Get audio info
         audio_info = audio_service.get_audio_info(output_path)
-        
-        # Get unique speakers
-        unique_speakers = {seg['speaker']: seg['gender'] for seg in segments}
-        
+
         logger.info(
-            f"✅ Multi-speaker audio generated: {output_path.name} "
-            f"({len(segments)} segments in {generation_time:.1f}s)"
+            f"✅ Full audiobook generated: {output_path.name} "
+            f"({total_segments_processed} segments, {len(chapter_results)} chapters, {generation_time:.1f}s)"
         )
-        
+
         return {
             "success": True,
             "audiobook_id": output_path.stem,
             "audio_url": f"/api/outputs/{output_path.name}",
             "duration": audio_info.get('duration', 0.0),
             "file_size": audio_info.get('file_size', 0),
-            "segments_processed": len(segments),
+            "segments_processed": total_segments_processed,
             "speakers_used": unique_speakers,
-            "speakers_detected": request.get('speakers_detected', []),
-            "generation_time": generation_time
+            "generation_time": generation_time,
+            "chapters": chapter_results,
         }
         
     except HTTPException:
@@ -1080,38 +1150,49 @@ async def clone_voice(
         
         logger.info(f"Audio file saved to: {audio_path}")
         
-        # Extract voice embedding using XTTS
+        # Save the reference audio as the voice profile
+        # XTTS uses raw conditioning audio — no GPU-only embedding extraction needed
         try:
-            from TTS.api import TTS
+            import shutil
             
-            logger.info("Loading XTTS model for voice extraction...")
-            tts_model = TTS(
-                model_name=settings.TTS_MODEL,
-                gpu=(settings.get_device() != "cpu")
-            )
+            voice_id_temp = f"custom_{uuid.uuid4().hex[:12]}"
+            final_audio_path = settings.EMBEDDINGS_DIR / f"{voice_id_temp}.wav"
+            shutil.copy2(str(audio_path), str(final_audio_path))
             
-            # Extract speaker embedding
-            logger.info("Extracting speaker embedding from audio sample...")
-            speaker_embedding = tts_model.synthesizer.tts_model.get_speaker_embedding(
-                str(audio_path)
-            )
+            # Optionally validate audio duration using pydub/soundfile
+            try:
+                import soundfile as sf
+                data, sr = sf.read(str(final_audio_path))
+                duration = len(data) / sr
+                if duration < 3:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"Audio too short ({duration:.1f}s). Please upload at least 6 seconds of speech."
+                    )
+                logger.info(f"✅ Voice audio saved: {final_audio_path.name} ({duration:.1f}s)")
+            except HTTPException:
+                raise
+            except Exception:
+                logger.info(f"✅ Voice audio saved: {final_audio_path.name}")
             
-            logger.info(f"✅ Speaker embedding extracted: shape={speaker_embedding.shape}")
+            # Store a small metadata .pt file so existing code can find it
+            import torch
+            meta = {"audio_path": str(final_audio_path), "voice_name": voice_name, "gender": gender}
+            torch.save(meta, settings.EMBEDDINGS_DIR / f"{voice_id_temp}.pt")
+            voice_id = voice_id_temp
             
+        except HTTPException:
+            raise
         except Exception as e:
-            logger.error(f"Failed to extract embedding: {e}")
+            logger.error(f"Failed to save voice profile: {e}")
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                 detail=f"Voice extraction failed: {str(e)}"
             )
         
-        # Generate unique voice ID
-        voice_id = f"custom_{uuid.uuid4().hex[:12]}"
-        
-        # Save embedding to disk
+        # Embedding path already saved above
         embeddings_path = settings.EMBEDDINGS_DIR / f"{voice_id}.pt"
-        torch.save(speaker_embedding, embeddings_path)
-        logger.info(f"Embedding saved to: {embeddings_path}")
+        logger.info(f"Voice profile saved to: {embeddings_path}")
         
         # Cache in Redis for fast access
         try:
@@ -1195,33 +1276,49 @@ async def list_voices():
     try:
         voices = []
         
-        # Add default voices
+        # Add default voices (with mood/type/featured for the frontend)
         for demo_voice in settings.DEMO_VOICES:
             voices.append({
                 "voice_id": demo_voice["id"],
                 "voice_name": demo_voice["name"],
                 "gender": demo_voice.get("gender", "neutral"),
-                "language": demo_voice.get("language", "english"),
+                "language": demo_voice.get("language", "en"),
+                "type": demo_voice.get("type", "Neural"),
+                "mood": demo_voice.get("mood", "Natural"),
+                "featured": demo_voice.get("featured", False),
                 "is_custom": False,
-                "description": demo_voice.get("description", "")
+                "description": demo_voice.get("description", ""),
+                "sample_url": f"/api/voices/{demo_voice['id']}/sample",
             })
         
-        # Add custom cloned voices
+        # Add custom cloned voices — read metadata from .pt file
+        import torch as _torch
         embeddings_dir = settings.EMBEDDINGS_DIR
         if embeddings_dir.exists():
-            for embedding_file in embeddings_dir.glob("custom_*.pt"):
-                voice_id = embedding_file.stem
-                # Try to get metadata from cache or defaults
+            for pt_file in sorted(embeddings_dir.glob("custom_*.pt")):
+                voice_id = pt_file.stem
+                voice_name = f"Custom Voice ({voice_id[:8]})"
+                gender = "neutral"
+                try:
+                    meta = _torch.load(str(pt_file), map_location="cpu", weights_only=False)
+                    if isinstance(meta, dict) and "voice_name" in meta:
+                        voice_name = meta["voice_name"]
+                        gender = meta.get("gender", "neutral")
+                except Exception:
+                    pass
                 voices.append({
                     "voice_id": voice_id,
-                    "voice_name": f"Custom Voice ({voice_id[:8]})",
-                    "gender": "neutral",
-                    "language": "english",
+                    "voice_name": voice_name,
+                    "gender": gender,
+                    "language": "en",
+                    "type": "Cloned",
+                    "mood": "Custom Clone",
+                    "featured": False,
                     "is_custom": True,
-                    "embedding_path": str(embedding_file)
+                    "sample_url": f"/api/voices/{voice_id}/sample",
                 })
         
-        logger.info(f"Retrieved {len(voices)} available voices")
+        logger.info(f"Retrieved {len(voices)} available voices ({sum(1 for v in voices if v['is_custom'])} cloned)")
         return {
             "voices": voices,
             "total": len(voices)
@@ -1237,10 +1334,19 @@ async def list_voices():
 
 # ==================== ASYNC TASK ENDPOINTS ====================
 
-def _run_generation_background(task_id: str, segments: list, voice_assignments: dict, speed: float):
+def _run_generation_background(
+    task_id: str,
+    chapters_input: list,
+    voice_assignments: dict,
+    speed: float,
+    language: str = "en",
+    target_language: str = "en",
+    source_language: str = "en",
+    emotion_intensity: float = 1.5,
+):
     """
-    Run audiobook generation in a background thread, updating task_store
-    with incremental progress so the frontend can poll or stream updates.
+    Run per-chapter audiobook generation in a background thread.
+    Updates task_store with incremental progress so the frontend can poll.
     """
     import asyncio
 
@@ -1249,58 +1355,82 @@ def _run_generation_background(task_id: str, segments: list, voice_assignments: 
     task["progress"] = 0
     task["message"] = "Starting generation…"
 
-    total = len(segments)
-
     async def _run():
         try:
             from app.services.processor import audiobook_processor
             from app.services.audio_service import audio_service
 
-            audio_files = []
-            generated_speakers = []
+            timestamp = int(time.time())
+            chapter_results = []
+            all_chapter_paths = []
+            total_segments = sum(len(ch.get("segments", [])) for ch in chapters_input)
+            segments_done = 0
 
-            for i, segment in enumerate(segments, 1):
-                from app.services.tts_service import tts_service
-                from app.services.nlp.emotion_engine import emotion_service
+            for ch_idx, chapter in enumerate(chapters_input):
+                ch_id = chapter.get("chapter_id", ch_idx + 1)
+                ch_title = chapter.get("chapter_title", f"Chapter {ch_id}")
+                ch_segments = chapter.get("segments", [])
+                if not ch_segments:
+                    continue
 
-                voice_id = voice_assignments.get(
-                    segment["speaker"],
-                    audiobook_processor._get_default_voice_for_gender(segment.get("gender", "male"))
+                task["message"] = f"Generating chapter {ch_id}: {ch_title}…"
+
+                # Translate segments if source and target languages differ
+                if source_language.lower().strip() != target_language.lower().strip():
+                    try:
+                        from app.services.translation_service import translation_service
+                        task["message"] = f"Translating chapter {ch_id}…"
+                        ch_segments = translation_service.translate_segments(
+                            segments=ch_segments,
+                            source_lang=source_language,
+                            target_lang=target_language,
+                        )
+                        logger.info(f"Task {task_id}: chapter {ch_id} translated → {target_language}")
+                    except Exception as te:
+                        logger.warning(f"Task {task_id}: translation failed for chapter {ch_id}: {te}")
+
+                safe_title_ch = "".join(c if c.isalnum() else "_" for c in ch_title)[:30]
+                safe_ch = f"ch{ch_id}_{safe_title_ch}"[:60]
+                ch_output_path = settings.OUTPUT_DIR / f"{safe_ch}_{timestamp}.wav"
+
+                ch_path = await audiobook_processor.generate_audiobook(
+                    segments=ch_segments,
+                    voice_assignments=None,
+                    speed=speed,
+                    output_path=ch_output_path,
+                    language=language,
                 )
-                emotion = segment.get("emotion", "neutral")
-                prosody = emotion_service.get_prosody_settings(emotion, intensity=1.5)
-                adjusted_speed = max(0.75, min(1.35, speed * prosody["speed"]))
 
-                text = segment["text"]
-                if emotion in ["tender", "romantic", "longing", "sad"]:
-                    text = text.replace(". ", "... ")
-                elif emotion in ["passionate", "excited", "breathless"]:
-                    text = text.replace("...", ".")
+                ch_info = audio_service.get_audio_info(ch_path)
+                all_chapter_paths.append(ch_path)
+                segments_done += len(ch_segments)
+                chapter_results.append({
+                    "chapter_id": ch_id,
+                    "chapter_title": ch_title,
+                    "audio_url": f"/api/outputs/{ch_path.name}",
+                    "duration": ch_info.get("duration", 0.0),
+                    "segments": len(ch_segments),
+                })
 
-                try:
-                    audio_path = await tts_service.generate_speech(
-                        text=text, voice=voice_id, speed=adjusted_speed,
-                        language="en", emotion=emotion,
-                    )
-                    audio_files.append(audio_path)
-                    generated_speakers.append(segment["speaker"])
-                except Exception as seg_err:
-                    logger.warning(f"Task {task_id}: skipping segment {i}: {seg_err}")
+                # Progress: 0-90% across chapters, 90-100% reserved for merge
+                task["progress"] = int((segments_done / max(total_segments, 1)) * 90)
+                task["message"] = f"Chapter {ch_id} done ({segments_done}/{total_segments} segments)"
+                logger.info(f"Task {task_id}: chapter {ch_id} done → {ch_path.name}")
 
-                progress = int(i / total * 90)   # reserve last 10% for merge
-                task["progress"] = progress
-                task["message"] = f"Generated {i}/{total} segments"
+            if not all_chapter_paths:
+                raise RuntimeError("No audio generated for any chapter")
 
-            if not audio_files:
-                raise RuntimeError("No audio segments generated")
-
-            task["message"] = "Merging audio…"
+            task["message"] = "Merging chapters…"
             task["progress"] = 91
 
-            final_audio = await audio_service.merge_audio_files(
-                audio_files,
-                speaker_sequence=generated_speakers,
-            )
+            if len(all_chapter_paths) == 1:
+                final_audio = all_chapter_paths[0]
+            else:
+                named_output = settings.OUTPUT_DIR / f"audiobook_{task_id}_{timestamp}.mp3"
+                final_audio = await audio_service.merge_audio_files(
+                    all_chapter_paths,
+                    output_path=named_output,
+                )
 
             audio_info = audio_service.get_audio_info(final_audio)
             task["status"] = "done"
@@ -1311,7 +1441,8 @@ def _run_generation_background(task_id: str, segments: list, voice_assignments: 
                 "audio_url": f"/api/outputs/{final_audio.name}",
                 "duration": audio_info.get("duration", 0.0),
                 "file_size": audio_info.get("file_size", 0),
-                "segments_processed": len(audio_files),
+                "segments_processed": segments_done,
+                "chapters": chapter_results,
             }
 
         except Exception as e:
@@ -1342,24 +1473,49 @@ async def generate_async(request: dict):
     Accepts the same body as /generate/from-processing.
     Returns a task_id immediately so the user is not left waiting.
     """
-    # Extract segments (same logic as generate_from_processing)
-    segments = []
-    if "chapters" in request and isinstance(request["chapters"], list):
-        for chapter in request["chapters"]:
-            if "segments" in chapter:
-                segments.extend(chapter["segments"])
-    elif "segments" in request and isinstance(request["segments"], list):
-        segments = request["segments"]
-
-    if not segments:
+    chapters_input = request.get("chapters", [])
+    if not chapters_input:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="No segments found. Provide 'chapters' (from /process/v2) or 'segments' array.",
+            detail="No chapters found. Provide 'chapters' array (from /process/v2).",
+        )
+
+    total_segments = sum(len(ch.get("segments", [])) for ch in chapters_input)
+    if total_segments == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No segments found in provided chapters.",
         )
 
     base_speed = float(request.get("base_speed", 1.0))
-    task_id = _uuid.uuid4().hex[:16]
+    source_language = request.get("source_language", "en")
+    target_language = request.get("target_language", "en")
+    emotion_intensity = float(request.get("emotion_intensity", 1.5))
 
+    _LANG_TO_XTTS = {
+        "english": "en", "en": "en",
+        "spanish": "es", "es": "es",
+        "french": "fr", "fr": "fr",
+        "german": "de", "de": "de",
+        "italian": "it", "it": "it",
+        "portuguese": "pt", "pt": "pt",
+        "polish": "pl", "pl": "pl",
+        "turkish": "tr", "tr": "tr",
+        "russian": "ru", "ru": "ru",
+        "dutch": "nl", "nl": "nl",
+        "czech": "cs", "cs": "cs",
+        "arabic": "ar", "ar": "ar",
+        "chinese": "zh-cn", "zh": "zh-cn",
+        "japanese": "ja", "ja": "ja",
+        "korean": "ko", "ko": "ko",
+        "hindi": "hi", "hi": "hi",
+        "hungarian": "hu", "hu": "hu",
+        # Urdu uses Arabic script — map to "ar" since XTTS v2 doesn't have "ur"
+        "urdu": "ar", "ur": "ar",
+    }
+    tts_lang = _LANG_TO_XTTS.get(target_language.lower().strip(), "en")
+
+    task_id = _uuid.uuid4().hex[:16]
     task_store[task_id] = {
         "status": "queued",
         "progress": 0,
@@ -1369,7 +1525,6 @@ async def generate_async(request: dict):
         "created_at": time.time(),
     }
 
-    # Build voice_assignments dict
     voice_assignments = {}
     for assignment in request.get("voice_assignments", []):
         if isinstance(assignment, dict):
@@ -1377,13 +1532,22 @@ async def generate_async(request: dict):
 
     thread = threading.Thread(
         target=_run_generation_background,
-        args=(task_id, segments, voice_assignments, base_speed),
+        kwargs={
+            "task_id": task_id,
+            "chapters_input": chapters_input,
+            "voice_assignments": voice_assignments,
+            "speed": base_speed,
+            "language": tts_lang,
+            "target_language": target_language,
+            "source_language": source_language,
+            "emotion_intensity": emotion_intensity,
+        },
         daemon=True,
     )
     thread.start()
 
-    logger.info(f"Async task started: {task_id} ({len(segments)} segments)")
-    return {"task_id": task_id, "status": "queued", "segments": len(segments)}
+    logger.info(f"Async task started: {task_id} ({len(chapters_input)} chapters, {total_segments} segments)")
+    return {"task_id": task_id, "status": "queued", "chapters": len(chapters_input), "segments": total_segments}
 
 
 @router.get(
@@ -1436,6 +1600,72 @@ async def stream_task_progress(task_id: str):
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ==================== EVALUATION ENDPOINT ====================
+
+@router.post(
+    "/evaluate",
+    response_model=EvaluationResponse,
+    summary="Evaluate Voice Quality",
+    description=(
+        "Run objective voice quality metrics on a generated audio file.\n\n"
+        "**Metrics computed:**\n"
+        "- **WER** (Word Error Rate) — requires `original_text`\n"
+        "- **UTMOS** (Predicted MOS, 1–5)\n"
+        "- **SNR** (Signal-to-Noise Ratio in dB)\n"
+        "- **SER** (Emotion accuracy) — enhanced when `intended_emotion` is given\n"
+        "- **SECS** (Speaker similarity, −1 to 1) — requires `reference_audio`\n\n"
+        "Called internally by the Django admin portal — not intended for end users."
+    ),
+)
+async def evaluate_audio(
+    audio_file: UploadFile = File(..., description="Generated audio file (wav/mp3)"),
+    reference_audio: Optional[UploadFile] = File(None, description="Reference voice sample for SECS (optional)"),
+    original_text: Optional[str] = Form(None, description="Source text for WER computation (optional)"),
+    intended_emotion: Optional[str] = Form(None, description="Intended emotion label for SER accuracy (optional)"),
+):
+    """Evaluate voice quality across all objective metrics."""
+    import tempfile, os
+
+    audio_tmp = None
+    ref_tmp = None
+
+    try:
+        # Save uploaded audio to temp file
+        suffix = Path(audio_file.filename or "audio.wav").suffix or ".wav"
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as f:
+            f.write(await audio_file.read())
+            audio_tmp = f.name
+
+        # Save reference audio if provided
+        ref_path = None
+        if reference_audio and reference_audio.filename:
+            ref_suffix = Path(reference_audio.filename).suffix or ".wav"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=ref_suffix) as f:
+                f.write(await reference_audio.read())
+                ref_tmp = f.name
+                ref_path = ref_tmp
+
+        logger.info(
+            f"Evaluate request: emotion={intended_emotion}, "
+            f"has_text={bool(original_text)}, has_reference={bool(ref_path)}"
+        )
+
+        result = evaluation_service.evaluate(
+            audio_path=audio_tmp,
+            original_text=original_text,
+            reference_audio_path=ref_path,
+            intended_emotion=intended_emotion,
+        )
+
+        return EvaluationResponse(**result)
+
+    finally:
+        if audio_tmp and os.path.exists(audio_tmp):
+            os.unlink(audio_tmp)
+        if ref_tmp and os.path.exists(ref_tmp):
+            os.unlink(ref_tmp)
 
 
 # EXPORT

@@ -36,6 +36,7 @@ pydub==0.25.1
 librosa==0.10.0
 soundfile==0.12.1
 pyloudnorm>=0.1.1      # broadcast LUFS normalization
+noisereduce>=3.0.0     # spectral noise reduction for TTS output and voice samples
 num2words>=0.5.13      # number-to-spoken-word for TTS pre-processing
 # Note: ffmpeg required (install via system package manager)
 

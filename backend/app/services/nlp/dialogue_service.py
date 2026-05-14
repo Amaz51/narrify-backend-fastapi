@@ -108,29 +108,16 @@ class DialogueService:
             if speaker.lower() not in self.pronouns:
                 return speaker, match.group(2)
         
-        # Pattern 3: "dialogue," Name said
-        # Example: "Hello," Harry said
+        # Pattern 3: "dialogue," Name said  (also handles short exclamations like "Yes," Hermione replied)
+        # Example: "Hello," Harry said  |  "Yes," Hermione replied
         pattern = rf'"([^"]+),?"\s*,?\s*([A-Z][a-z]+)\s+(?:{reporting_pattern})'
         match = re.search(pattern, sentence)
         if match:
             speaker = match.group(2)
             if speaker.lower() not in self.pronouns:
                 return speaker, match.group(1)
-        
-        # Pattern 4: "Word," Name verb (e.g., "Yes," Hermione replied)
-        # FIX: This was capturing "Yes" as speaker!
-        pattern = rf'"([^"]+),?"\s*,?\s*([A-Z][a-z]+)\s+(?:{reporting_pattern})'
-        match = re.search(pattern, sentence)
-        if match:
-            word = match.group(1)
-            speaker = match.group(2)
-            
-            # Check if first capture is a single word (likely not dialogue)
-            if len(word.split()) <= 2 and speaker.lower() not in self.pronouns:
-                # "Yes," Hermione replied → Return Hermione, not "Yes"
-                return speaker, word
-        
-        # Pattern 5: Name said breathlessly/excitedly/etc, "dialogue"
+
+        # Pattern 4: Name said breathlessly/excitedly/etc, "dialogue"
         # Example: Hermione said breathlessly, "It's a letter"
         pattern = rf'([A-Z][a-z]+)\s+(?:{reporting_pattern})\s+\w+ly\s*,?\s*"([^"]+)"'
         match = re.search(pattern, sentence)
