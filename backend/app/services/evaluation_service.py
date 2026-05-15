@@ -32,8 +32,8 @@ class EvaluationService:
         if self._whisper_model is None:
             try:
                 import whisper
-                self._whisper_model = whisper.load_model("base")
-                logger.info("Whisper model loaded (base)")
+                self._whisper_model = whisper.load_model("tiny")
+                logger.info("Whisper model loaded (tiny)")
             except ImportError:
                 logger.warning("openai-whisper not installed — WER will be unavailable")
             except Exception as e:
@@ -79,17 +79,38 @@ class EvaluationService:
 
     # ── Individual metrics ────────────────────────────────────────────────────
 
+    def _trim_audio(self, audio_path: str, max_seconds: int = 60) -> str:
+        """Return a path to a trimmed copy (≤ max_seconds). Returns original path if already short."""
+        try:
+            data, sr = sf.read(audio_path)
+            max_samples = sr * max_seconds
+            if len(data) <= max_samples:
+                return audio_path
+            trimmed = data[:max_samples]
+            suffix = Path(audio_path).suffix or ".wav"
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as f:
+                sf.write(f.name, trimmed, sr)
+                return f.name
+        except Exception:
+            return audio_path
+
     def compute_wer(self, audio_path: str, original_text: Optional[str] = None) -> dict:
         """
-        Transcribe audio with Whisper and optionally compute WER/CER.
-        Transcription runs regardless of whether original_text is provided.
+        Transcribe first 60 s of audio with Whisper and optionally compute WER/CER.
+        Trimming to 60 s keeps transcription fast while remaining representative.
         """
         try:
             model = self._load_whisper()
             if model is None:
                 return {"wer": None, "cer": None, "error": "openai-whisper not installed"}
 
-            result = model.transcribe(audio_path)
+            trimmed_path = self._trim_audio(audio_path, max_seconds=60)
+            result = model.transcribe(trimmed_path)
+            if trimmed_path != audio_path:
+                try:
+                    os.unlink(trimmed_path)
+                except OSError:
+                    pass
             transcribed = result["text"].strip()
 
             if not original_text or not original_text.strip():
@@ -201,13 +222,21 @@ class EvaluationService:
             return {"utmos": None, "error": str(e)}
 
     def compute_ser(self, audio_path: str, intended_emotion: Optional[str] = None) -> dict:
-        """Speech Emotion Recognition using wav2vec2 classifier."""
+        """Speech Emotion Recognition using wav2vec2 classifier (first 30 s)."""
         try:
             pipe = self._load_ser()
             if pipe is None:
                 return {"detected_emotion": None, "error": "SER model not available"}
 
-            results = pipe(audio_path)
+            trimmed = self._trim_audio(audio_path, max_seconds=30)
+            try:
+                results = pipe(trimmed)
+            finally:
+                if trimmed != audio_path:
+                    try:
+                        os.unlink(trimmed)
+                    except OSError:
+                        pass
             top = results[0]
             detected = top["label"].lower()
             confidence = round(float(top["score"]), 4)

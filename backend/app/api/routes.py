@@ -1743,11 +1743,17 @@ async def evaluate_audio(
             f"has_text={bool(original_text)}, has_reference={bool(ref_path)}"
         )
 
-        result = evaluation_service.evaluate(
-            audio_path=audio_tmp,
-            original_text=original_text,
-            reference_audio_path=ref_path,
-            intended_emotion=intended_emotion,
+        import asyncio, functools
+        loop = asyncio.get_event_loop()
+        result = await loop.run_in_executor(
+            None,
+            functools.partial(
+                evaluation_service.evaluate,
+                audio_path=audio_tmp,
+                original_text=original_text,
+                reference_audio_path=ref_path,
+                intended_emotion=intended_emotion,
+            ),
         )
 
         return EvaluationResponse(**result)
