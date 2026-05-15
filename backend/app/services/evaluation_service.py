@@ -65,8 +65,11 @@ class EvaluationService:
 
     # ── Individual metrics ────────────────────────────────────────────────────
 
-    def compute_wer(self, audio_path: str, original_text: str) -> dict:
-        """Word Error Rate and Character Error Rate using Whisper + jiwer."""
+    def compute_wer(self, audio_path: str, original_text: Optional[str] = None) -> dict:
+        """
+        Transcribe audio with Whisper and optionally compute WER/CER.
+        Transcription runs regardless of whether original_text is provided.
+        """
         try:
             model = self._load_whisper()
             if model is None:
@@ -75,12 +78,19 @@ class EvaluationService:
             result = model.transcribe(audio_path)
             transcribed = result["text"].strip()
 
+            if not original_text or not original_text.strip():
+                return {
+                    "wer": None,
+                    "cer": None,
+                    "transcribed_text": transcribed[:500],
+                    "note": "Transcription complete — no reference text for WER",
+                }
+
             try:
                 import jiwer
                 wer = jiwer.wer(original_text, transcribed)
                 cer = jiwer.cer(original_text, transcribed)
             except ImportError:
-                # Rough WER without jiwer: compare word sets
                 ref_words = original_text.lower().split()
                 hyp_words = transcribed.lower().split()
                 errors = sum(1 for r, h in zip(ref_words, hyp_words) if r != h)
@@ -91,7 +101,7 @@ class EvaluationService:
             return {
                 "wer": round(float(wer), 4),
                 "cer": round(float(cer), 4) if cer is not None else None,
-                "transcribed_text": transcribed[:500],   # cap length
+                "transcribed_text": transcribed[:500],
             }
         except Exception as e:
             logger.error(f"WER computation failed: {e}")
@@ -128,12 +138,14 @@ class EvaluationService:
     def compute_utmos(self, audio_path: str) -> dict:
         """
         Predicted MOS score (1–5 scale, higher is better).
-        Uses utmos22 package if installed; falls back to a clipping-based energy proxy.
+        Uses torchaudio SQUIM (PESQ-based non-intrusive quality estimate).
+        Falls back to energy proxy only if torch/torchaudio unavailable.
         """
         try:
             import torch
             import torchaudio
 
+            # Try utmos22 first (if somehow installed)
             try:
                 import utmos
                 predictor = utmos.Score(device="cpu")
@@ -141,25 +153,37 @@ class EvaluationService:
                 score = predictor.calculate_one_sample(wav, sr)
                 return {"utmos": round(float(score), 4), "method": "utmos22"}
             except ImportError:
-                pass   # fall through to proxy
+                pass
 
-            # Proxy: penalise clipping and very low energy
-            data, sr = sf.read(audio_path)
+            # Use torchaudio SQUIM_OBJECTIVE (non-intrusive PESQ/STOI/SI-SDR)
+            try:
+                from torchaudio.pipelines import SQUIM_OBJECTIVE
+                waveform, sr = torchaudio.load(audio_path)
+                # SQUIM requires mono 16 kHz
+                if sr != 16000:
+                    waveform = torchaudio.functional.resample(waveform, sr, 16000)
+                if waveform.shape[0] > 1:
+                    waveform = waveform.mean(dim=0, keepdim=True)
+                model = SQUIM_OBJECTIVE.get_model()
+                with torch.no_grad():
+                    _stoi, pesq_hyp, _si_sdr = model(waveform)
+                # PESQ range −0.5–4.5 → map to MOS 1–5
+                pesq_val = float(pesq_hyp[0])
+                mos = 1.0 + (pesq_val + 0.5) / 5.0 * 4.0
+                mos = float(np.clip(mos, 1.0, 5.0))
+                return {"utmos": round(mos, 2), "method": "squim_pesq"}
+            except Exception as squim_err:
+                logger.warning(f"SQUIM failed, falling back to energy proxy: {squim_err}")
+
+            # Last-resort energy proxy
+            data, _sr = sf.read(audio_path)
             if data.ndim > 1:
                 data = data.mean(axis=1)
-
             clip_ratio = float(np.mean(np.abs(data) > 0.97))
-            rms = float(np.sqrt(np.mean(data ** 2)))
             silence_ratio = float(np.mean(np.abs(data) < 0.001))
+            proxy = float(np.clip(4.5 - clip_ratio * 10 - silence_ratio * 2, 1.0, 5.0))
+            return {"utmos": round(proxy, 2), "method": "energy_proxy"}
 
-            proxy = 4.5 - clip_ratio * 10 - silence_ratio * 2
-            proxy = float(np.clip(proxy, 1.0, 5.0))
-
-            return {
-                "utmos": round(proxy, 2),
-                "method": "energy_proxy",
-                "note": "Install utmos22 for accurate MOS prediction",
-            }
         except Exception as e:
             logger.error(f"UTMOS computation failed: {e}")
             return {"utmos": None, "error": str(e)}
@@ -262,11 +286,8 @@ class EvaluationService:
         logger.info(f"Running evaluation on: {audio_path}")
         metrics: dict = {}
 
-        # Intelligibility
-        if original_text and original_text.strip():
-            metrics["intelligibility"] = self.compute_wer(audio_path, original_text)
-        else:
-            metrics["intelligibility"] = {"wer": None, "cer": None, "note": "No reference text provided"}
+        # Intelligibility — always transcribe; WER computed only when original_text present
+        metrics["intelligibility"] = self.compute_wer(audio_path, original_text)
 
         # Naturalness
         metrics["naturalness"] = self.compute_utmos(audio_path)

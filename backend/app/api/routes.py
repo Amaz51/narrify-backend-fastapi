@@ -1162,6 +1162,23 @@ async def get_segments(file_id: str):
         )
 
 
+@router.get(
+    "/segments/{file_id}/text",
+    summary="Get original text from processed segments",
+    description="Returns concatenated text from cached segments for a processed file. Used by admin evaluation to auto-populate WER reference text.",
+)
+async def get_segment_text(file_id: str):
+    if file_id not in segment_cache:
+        raise HTTPException(status_code=404, detail=f"No cached segments for file_id: {file_id}")
+    result = segment_cache[file_id]
+    texts = []
+    for ch in result.get("chapters", []):
+        for seg in ch.get("segments", []):
+            if isinstance(seg, dict) and seg.get("text"):
+                texts.append(seg["text"].strip())
+    return {"text": " ".join(texts), "segment_count": len(texts)}
+
+
 # ==================== VOICE CLONING ====================
 
 @router.post(
