@@ -10,6 +10,7 @@ Computes objective quality metrics on generated audio:
 
 import os
 import tempfile
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
@@ -23,6 +24,7 @@ class EvaluationService:
         self._whisper_model = None
         self._ser_pipeline = None
         self._voice_encoder = None
+        self._squim_model = None   # cached SQUIM_OBJECTIVE model
 
     # ── Lazy model loaders ────────────────────────────────────────────────────
 
@@ -62,6 +64,18 @@ class EvaluationService:
             except Exception as e:
                 logger.error(f"Voice encoder load failed: {e}")
         return self._voice_encoder
+
+    def _load_squim(self):
+        if self._squim_model is None:
+            try:
+                import torch
+                from torchaudio.pipelines import SQUIM_OBJECTIVE
+                self._squim_model = SQUIM_OBJECTIVE.get_model()
+                self._squim_model.eval()
+                logger.info("SQUIM_OBJECTIVE model loaded")
+            except Exception as e:
+                logger.warning(f"SQUIM model load failed: {e}")
+        return self._squim_model
 
     # ── Individual metrics ────────────────────────────────────────────────────
 
@@ -155,23 +169,21 @@ class EvaluationService:
             except ImportError:
                 pass
 
-            # Use torchaudio SQUIM_OBJECTIVE (non-intrusive PESQ/STOI/SI-SDR)
+            # Use cached torchaudio SQUIM_OBJECTIVE (non-intrusive PESQ/STOI/SI-SDR)
             try:
-                from torchaudio.pipelines import SQUIM_OBJECTIVE
-                waveform, sr = torchaudio.load(audio_path)
-                # SQUIM requires mono 16 kHz
-                if sr != 16000:
-                    waveform = torchaudio.functional.resample(waveform, sr, 16000)
-                if waveform.shape[0] > 1:
-                    waveform = waveform.mean(dim=0, keepdim=True)
-                model = SQUIM_OBJECTIVE.get_model()
-                with torch.no_grad():
-                    _stoi, pesq_hyp, _si_sdr = model(waveform)
-                # PESQ range −0.5–4.5 → map to MOS 1–5
-                pesq_val = float(pesq_hyp[0])
-                mos = 1.0 + (pesq_val + 0.5) / 5.0 * 4.0
-                mos = float(np.clip(mos, 1.0, 5.0))
-                return {"utmos": round(mos, 2), "method": "squim_pesq"}
+                squim = self._load_squim()
+                if squim is not None:
+                    waveform, sr = torchaudio.load(audio_path)
+                    if sr != 16000:
+                        waveform = torchaudio.functional.resample(waveform, sr, 16000)
+                    if waveform.shape[0] > 1:
+                        waveform = waveform.mean(dim=0, keepdim=True)
+                    with torch.no_grad():
+                        _stoi, pesq_hyp, _si_sdr = squim(waveform)
+                    pesq_val = float(pesq_hyp[0])
+                    mos = 1.0 + (pesq_val + 0.5) / 5.0 * 4.0
+                    mos = float(np.clip(mos, 1.0, 5.0))
+                    return {"utmos": round(mos, 2), "method": "squim_pesq"}
             except Exception as squim_err:
                 logger.warning(f"SQUIM failed, falling back to energy proxy: {squim_err}")
 
@@ -282,27 +294,31 @@ class EvaluationService:
         reference_audio_path: Optional[str] = None,
         intended_emotion: Optional[str] = None,
     ) -> dict:
-        """Run all metrics and return a unified result dict."""
+        """Run all metrics in parallel and return a unified result dict."""
         logger.info(f"Running evaluation on: {audio_path}")
+
+        tasks = {
+            "intelligibility": lambda: self.compute_wer(audio_path, original_text),
+            "naturalness":     lambda: self.compute_utmos(audio_path),
+            "audio_quality":   lambda: self.compute_snr(audio_path),
+            "emotion":         lambda: self.compute_ser(audio_path, intended_emotion),
+            "speaker_similarity": (
+                lambda: self.compute_secs(audio_path, reference_audio_path)
+                if reference_audio_path
+                else {"secs": None, "note": "No reference audio provided"}
+            ),
+        }
+
         metrics: dict = {}
-
-        # Intelligibility — always transcribe; WER computed only when original_text present
-        metrics["intelligibility"] = self.compute_wer(audio_path, original_text)
-
-        # Naturalness
-        metrics["naturalness"] = self.compute_utmos(audio_path)
-
-        # Audio quality
-        metrics["audio_quality"] = self.compute_snr(audio_path)
-
-        # Emotion
-        metrics["emotion"] = self.compute_ser(audio_path, intended_emotion)
-
-        # Speaker similarity (only when reference is available)
-        if reference_audio_path:
-            metrics["speaker_similarity"] = self.compute_secs(audio_path, reference_audio_path)
-        else:
-            metrics["speaker_similarity"] = {"secs": None, "note": "No reference audio provided"}
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = {pool.submit(fn): key for key, fn in tasks.items()}
+            for future in as_completed(futures):
+                key = futures[future]
+                try:
+                    metrics[key] = future.result()
+                except Exception as exc:
+                    logger.error(f"Metric '{key}' raised: {exc}")
+                    metrics[key] = {"error": str(exc)}
 
         metrics["overall_score"] = self._overall_score(metrics)
         logger.info(f"Evaluation complete. Overall score: {metrics['overall_score']}")
