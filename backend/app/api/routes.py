@@ -80,8 +80,82 @@ chapter_cache = {}
 segment_cache = {}
 
 # ── Async task store ────────────────────────────────────────────────────────
-# task_id -> {status, progress, message, result, error, created_at}
-task_store: Dict[str, Dict] = {}
+# Redis-backed so task state survives FastAPI --reload restarts.
+# Falls back to in-memory dict when Redis is unavailable.
+
+class _TaskProxy(dict):
+    """dict subclass that writes every __setitem__ back to the parent store."""
+    def __init__(self, store: "_RedisTaskStore", task_id: str, data: dict):
+        super().__init__(data)
+        object.__setattr__(self, '_store', store)
+        object.__setattr__(self, '_task_id', task_id)
+
+    def __setitem__(self, key, value):
+        super().__setitem__(key, value)
+        try:
+            object.__getattribute__(self, '_store')._write(
+                object.__getattribute__(self, '_task_id'), dict(self)
+            )
+        except Exception:
+            pass
+
+
+class _RedisTaskStore:
+    _TTL = 86400  # 24 h
+
+    def __init__(self):
+        self._local: Dict[str, dict] = {}
+        self._redis = None
+        try:
+            import redis as _redis_lib
+            self._redis = _redis_lib.from_url(settings.REDIS_URL, decode_responses=True)
+            self._redis.ping()
+            logger.info("RedisTaskStore: connected to Redis")
+        except Exception as exc:
+            logger.warning(f"RedisTaskStore: Redis unavailable, using in-memory fallback ({exc})")
+
+    def _key(self, task_id: str) -> str:
+        return f"narrify:task:{task_id}"
+
+    def _write(self, task_id: str, data: dict) -> None:
+        self._local[task_id] = data
+        if self._redis:
+            try:
+                self._redis.setex(self._key(task_id), self._TTL, json.dumps(data))
+            except Exception:
+                pass
+
+    def _read_raw(self, task_id: str):
+        if task_id in self._local:
+            return self._local[task_id]
+        if self._redis:
+            try:
+                raw = self._redis.get(self._key(task_id))
+                if raw:
+                    data = json.loads(raw)
+                    self._local[task_id] = data
+                    return data
+            except Exception:
+                pass
+        return None
+
+    def __setitem__(self, task_id: str, value: dict) -> None:
+        self._write(task_id, value)
+
+    def __getitem__(self, task_id: str) -> _TaskProxy:
+        data = self._read_raw(task_id)
+        if data is None:
+            raise KeyError(task_id)
+        return _TaskProxy(self, task_id, data)
+
+    def get(self, task_id: str, default=None):
+        data = self._read_raw(task_id)
+        if data is None:
+            return default
+        return _TaskProxy(self, task_id, data)
+
+
+task_store = _RedisTaskStore()
 
 
 # ==================== PHASE 1 ENDPOINTS (ORIGINAL) ====================
