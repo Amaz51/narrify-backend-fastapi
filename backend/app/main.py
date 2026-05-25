@@ -48,7 +48,6 @@ async def lifespan(app: FastAPI):
     evaluation_service._load_whisper()
     evaluation_service._load_ser()
     evaluation_service._load_voice_encoder()
-    evaluation_service._load_squim()
     logger.info("Evaluation models ready")
     logger.info("Application startup complete")
 

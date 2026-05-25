@@ -10,7 +10,6 @@ Computes objective quality metrics on generated audio:
 
 import os
 import tempfile
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from typing import Optional
 
@@ -24,7 +23,6 @@ class EvaluationService:
         self._whisper_model = None
         self._ser_pipeline = None
         self._voice_encoder = None
-        self._squim_model = None   # cached SQUIM_OBJECTIVE model
 
     # ── Lazy model loaders ────────────────────────────────────────────────────
 
@@ -32,8 +30,8 @@ class EvaluationService:
         if self._whisper_model is None:
             try:
                 import whisper
-                self._whisper_model = whisper.load_model("tiny")
-                logger.info("Whisper model loaded (tiny)")
+                self._whisper_model = whisper.load_model("base")
+                logger.info("Whisper model loaded (base)")
             except ImportError:
                 logger.warning("openai-whisper not installed — WER will be unavailable")
             except Exception as e:
@@ -65,67 +63,24 @@ class EvaluationService:
                 logger.error(f"Voice encoder load failed: {e}")
         return self._voice_encoder
 
-    def _load_squim(self):
-        if self._squim_model is None:
-            try:
-                import torch
-                from torchaudio.pipelines import SQUIM_OBJECTIVE
-                self._squim_model = SQUIM_OBJECTIVE.get_model()
-                self._squim_model.eval()
-                logger.info("SQUIM_OBJECTIVE model loaded")
-            except Exception as e:
-                logger.warning(f"SQUIM model load failed: {e}")
-        return self._squim_model
-
     # ── Individual metrics ────────────────────────────────────────────────────
 
-    def _trim_audio(self, audio_path: str, max_seconds: int = 60) -> str:
-        """Return a path to a trimmed copy (≤ max_seconds). Returns original path if already short."""
-        try:
-            data, sr = sf.read(audio_path)
-            max_samples = sr * max_seconds
-            if len(data) <= max_samples:
-                return audio_path
-            trimmed = data[:max_samples]
-            suffix = Path(audio_path).suffix or ".wav"
-            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as f:
-                sf.write(f.name, trimmed, sr)
-                return f.name
-        except Exception:
-            return audio_path
-
-    def compute_wer(self, audio_path: str, original_text: Optional[str] = None) -> dict:
-        """
-        Transcribe first 60 s of audio with Whisper and optionally compute WER/CER.
-        Trimming to 60 s keeps transcription fast while remaining representative.
-        """
+    def compute_wer(self, audio_path: str, original_text: str) -> dict:
+        """Word Error Rate and Character Error Rate using Whisper + jiwer."""
         try:
             model = self._load_whisper()
             if model is None:
                 return {"wer": None, "cer": None, "error": "openai-whisper not installed"}
 
-            trimmed_path = self._trim_audio(audio_path, max_seconds=60)
-            result = model.transcribe(trimmed_path)
-            if trimmed_path != audio_path:
-                try:
-                    os.unlink(trimmed_path)
-                except OSError:
-                    pass
+            result = model.transcribe(audio_path)
             transcribed = result["text"].strip()
-
-            if not original_text or not original_text.strip():
-                return {
-                    "wer": None,
-                    "cer": None,
-                    "transcribed_text": transcribed[:500],
-                    "note": "Transcription complete — no reference text for WER",
-                }
 
             try:
                 import jiwer
                 wer = jiwer.wer(original_text, transcribed)
                 cer = jiwer.cer(original_text, transcribed)
             except ImportError:
+                # Rough WER without jiwer: compare word sets
                 ref_words = original_text.lower().split()
                 hyp_words = transcribed.lower().split()
                 errors = sum(1 for r, h in zip(ref_words, hyp_words) if r != h)
@@ -136,7 +91,7 @@ class EvaluationService:
             return {
                 "wer": round(float(wer), 4),
                 "cer": round(float(cer), 4) if cer is not None else None,
-                "transcribed_text": transcribed[:500],
+                "transcribed_text": transcribed[:500],   # cap length
             }
         except Exception as e:
             logger.error(f"WER computation failed: {e}")
@@ -173,14 +128,12 @@ class EvaluationService:
     def compute_utmos(self, audio_path: str) -> dict:
         """
         Predicted MOS score (1–5 scale, higher is better).
-        Uses torchaudio SQUIM (PESQ-based non-intrusive quality estimate).
-        Falls back to energy proxy only if torch/torchaudio unavailable.
+        Uses utmos22 package if installed; falls back to a clipping-based energy proxy.
         """
         try:
             import torch
             import torchaudio
 
-            # Try utmos22 first (if somehow installed)
             try:
                 import utmos
                 predictor = utmos.Score(device="cpu")
@@ -188,55 +141,37 @@ class EvaluationService:
                 score = predictor.calculate_one_sample(wav, sr)
                 return {"utmos": round(float(score), 4), "method": "utmos22"}
             except ImportError:
-                pass
+                pass   # fall through to proxy
 
-            # Use cached torchaudio SQUIM_OBJECTIVE (non-intrusive PESQ/STOI/SI-SDR)
-            try:
-                squim = self._load_squim()
-                if squim is not None:
-                    waveform, sr = torchaudio.load(audio_path)
-                    if sr != 16000:
-                        waveform = torchaudio.functional.resample(waveform, sr, 16000)
-                    if waveform.shape[0] > 1:
-                        waveform = waveform.mean(dim=0, keepdim=True)
-                    with torch.no_grad():
-                        _stoi, pesq_hyp, _si_sdr = squim(waveform)
-                    pesq_val = float(pesq_hyp[0])
-                    mos = 1.0 + (pesq_val + 0.5) / 5.0 * 4.0
-                    mos = float(np.clip(mos, 1.0, 5.0))
-                    return {"utmos": round(mos, 2), "method": "squim_pesq"}
-            except Exception as squim_err:
-                logger.warning(f"SQUIM failed, falling back to energy proxy: {squim_err}")
-
-            # Last-resort energy proxy
-            data, _sr = sf.read(audio_path)
+            # Proxy: penalise clipping and very low energy
+            data, sr = sf.read(audio_path)
             if data.ndim > 1:
                 data = data.mean(axis=1)
-            clip_ratio = float(np.mean(np.abs(data) > 0.97))
-            silence_ratio = float(np.mean(np.abs(data) < 0.001))
-            proxy = float(np.clip(4.5 - clip_ratio * 10 - silence_ratio * 2, 1.0, 5.0))
-            return {"utmos": round(proxy, 2), "method": "energy_proxy"}
 
+            clip_ratio = float(np.mean(np.abs(data) > 0.97))
+            rms = float(np.sqrt(np.mean(data ** 2)))
+            silence_ratio = float(np.mean(np.abs(data) < 0.001))
+
+            proxy = 4.5 - clip_ratio * 10 - silence_ratio * 2
+            proxy = float(np.clip(proxy, 1.0, 5.0))
+
+            return {
+                "utmos": round(proxy, 2),
+                "method": "energy_proxy",
+                "note": "Install utmos22 for accurate MOS prediction",
+            }
         except Exception as e:
             logger.error(f"UTMOS computation failed: {e}")
             return {"utmos": None, "error": str(e)}
 
     def compute_ser(self, audio_path: str, intended_emotion: Optional[str] = None) -> dict:
-        """Speech Emotion Recognition using wav2vec2 classifier (first 30 s)."""
+        """Speech Emotion Recognition using wav2vec2 classifier."""
         try:
             pipe = self._load_ser()
             if pipe is None:
                 return {"detected_emotion": None, "error": "SER model not available"}
 
-            trimmed = self._trim_audio(audio_path, max_seconds=30)
-            try:
-                results = pipe(trimmed)
-            finally:
-                if trimmed != audio_path:
-                    try:
-                        os.unlink(trimmed)
-                    except OSError:
-                        pass
+            results = pipe(audio_path)
             top = results[0]
             detected = top["label"].lower()
             confidence = round(float(top["score"]), 4)
@@ -323,31 +258,30 @@ class EvaluationService:
         reference_audio_path: Optional[str] = None,
         intended_emotion: Optional[str] = None,
     ) -> dict:
-        """Run all metrics in parallel and return a unified result dict."""
+        """Run all metrics and return a unified result dict."""
         logger.info(f"Running evaluation on: {audio_path}")
-
-        tasks = {
-            "intelligibility": lambda: self.compute_wer(audio_path, original_text),
-            "naturalness":     lambda: self.compute_utmos(audio_path),
-            "audio_quality":   lambda: self.compute_snr(audio_path),
-            "emotion":         lambda: self.compute_ser(audio_path, intended_emotion),
-            "speaker_similarity": (
-                lambda: self.compute_secs(audio_path, reference_audio_path)
-                if reference_audio_path
-                else {"secs": None, "note": "No reference audio provided"}
-            ),
-        }
-
         metrics: dict = {}
-        with ThreadPoolExecutor(max_workers=5) as pool:
-            futures = {pool.submit(fn): key for key, fn in tasks.items()}
-            for future in as_completed(futures):
-                key = futures[future]
-                try:
-                    metrics[key] = future.result()
-                except Exception as exc:
-                    logger.error(f"Metric '{key}' raised: {exc}")
-                    metrics[key] = {"error": str(exc)}
+
+        # Intelligibility
+        if original_text and original_text.strip():
+            metrics["intelligibility"] = self.compute_wer(audio_path, original_text)
+        else:
+            metrics["intelligibility"] = {"wer": None, "cer": None, "note": "No reference text provided"}
+
+        # Naturalness
+        metrics["naturalness"] = self.compute_utmos(audio_path)
+
+        # Audio quality
+        metrics["audio_quality"] = self.compute_snr(audio_path)
+
+        # Emotion
+        metrics["emotion"] = self.compute_ser(audio_path, intended_emotion)
+
+        # Speaker similarity (only when reference is available)
+        if reference_audio_path:
+            metrics["speaker_similarity"] = self.compute_secs(audio_path, reference_audio_path)
+        else:
+            metrics["speaker_similarity"] = {"secs": None, "note": "No reference audio provided"}
 
         metrics["overall_score"] = self._overall_score(metrics)
         logger.info(f"Evaluation complete. Overall score: {metrics['overall_score']}")
